@@ -16,7 +16,7 @@ O sistema realiza:
 
 ## 🚀 Acesse o Dashboard
 
-🔗 https://SEUAPP.streamlit.app
+🔗 https://djacxkccnyigfwvumhfpns.streamlit.app/
 
 ---
 
