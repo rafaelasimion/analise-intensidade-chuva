@@ -300,7 +300,7 @@ for col in ["Chuva (mm)", "Intensidade (mm/h)", "Total (mm)"]:
         lambda x: f"{x:.2f}".replace(".", ",")
     )
 
-csv = tabela_excel.to_csv(index=False, sep=";").encode("utf-8")
+csv = tabela_excel.to_csv(index=False, sep=";").encode("utf-8-sig")
 
 st.download_button(
     "📥 Baixar dados",
@@ -384,7 +384,7 @@ for col in [
 
 st.dataframe(resumo_mensal, use_container_width=True, hide_index=True)
 
-csv2 = resumo_mensal.to_csv(index=False, sep=";").encode("utf-8")
+csv2 = resumo_mensal.to_csv(index=False, sep=";").encode("utf-8-sig")
 
 st.download_button(
     "📥 Baixar resumo mensal",
