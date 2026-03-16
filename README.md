@@ -1,6 +1,7 @@
 # 🌧️ Dashboard - Análise de Intensidade de Chuva (ESALQ)
 
-Dashboard interativo desenvolvido em **Python + Streamlit** para análise de dados pluviométricos da estação automática da ESALQ/USP.
+Dashboard interativo desenvolvido em **Python + Streamlit** para análise de dados pluviométricos da estação automática da ESALQ/USP. 
+🤖 Este projeto contou com auxílio de ferramentas de inteligência artificial durante o desenvolvimento do código e na resolução de problemas técnicos.
 
 <img width="1440" height="843" alt="analise-chuva" src="https://github.com/user-attachments/assets/4fcd6325-4e86-482d-b243-b3989c617638" />
 <img width="1627" height="865" alt="analise-chuva2" src="https://github.com/user-attachments/assets/ba3facd7-2a6b-4046-aa82-def1322786db" />
