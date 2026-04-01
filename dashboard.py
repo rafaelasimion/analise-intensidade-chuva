@@ -37,23 +37,34 @@ st.divider()
 # -------------------------------
 # FUNÇÃO PARA CARREGAR DADOS
 # -------------------------------
-
 @st.cache_data(ttl=86400)
 def carregar_ano(ano):
 
     csv_file = f"dados/dados_{ano}.csv"
     ano_atual = datetime.now().year
 
+    # usa cache local se não for ano atual
     if ano != ano_atual and os.path.exists(csv_file):
-        df = pd.read_csv(csv_file, parse_dates=["TIMESTAMP"])
-        return df
+        return pd.read_csv(csv_file, parse_dates=["TIMESTAMP"])
 
     url = f"http://www.leb.esalq.usp.br/leb/automatica/diario{ano}.xls"
 
-    r = requests.get(url)
+    try:
+        r = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        r.raise_for_status()
 
-    if r.status_code != 200:
-        raise Exception(f"Erro ao baixar dados do ano {ano}")
+    except requests.exceptions.RequestException:
+        st.warning(f"⚠️ Não foi possível baixar dados de {ano}")
+
+        # fallback: tenta usar CSV local
+        if os.path.exists(csv_file):
+            return pd.read_csv(csv_file, parse_dates=["TIMESTAMP"])
+
+        return pd.DataFrame()
 
     xls_file = f"dados/temp_{ano}.xls"
 
@@ -63,16 +74,15 @@ def carregar_ano(ano):
     preview = pd.read_excel(xls_file, header=None)
 
     header_row = None
-
     for i in range(10):
-        linha = preview.iloc[i].astype(str).str.contains("TIMESTAMP").any()
-        if linha:
+        if preview.iloc[i].astype(str).str.contains("TIMESTAMP").any():
             header_row = i
             break
 
     if header_row is None:
         os.remove(xls_file)
-        raise Exception("Cabeçalho não encontrado")
+        st.warning(f"⚠️ Cabeçalho não encontrado ({ano})")
+        return pd.DataFrame()
 
     df = pd.read_excel(xls_file, header=header_row)
 
@@ -82,26 +92,21 @@ def carregar_ano(ano):
 
     if col_chuva is None:
         os.remove(xls_file)
-        raise Exception("Coluna de chuva não encontrada")
+        st.warning(f"⚠️ Coluna de chuva não encontrada ({ano})")
+        return pd.DataFrame()
 
     df = df[["TIMESTAMP", col_chuva]]
-
     df = df.rename(columns={col_chuva: "Chuva_mm"})
 
     df = df[df["TIMESTAMP"] != "TS"]
 
     df["TIMESTAMP"] = pd.to_datetime(df["TIMESTAMP"], errors="coerce")
-
     df = df.dropna(subset=["TIMESTAMP"])
 
     df["Chuva_mm"] = pd.to_numeric(df["Chuva_mm"], errors="coerce")
 
-    # -------------------------------
-    # LIMPEZA DO SENSOR
-    # -------------------------------
-
+    # limpeza sensor
     df.loc[df["Chuva_mm"].isin([6999, 7999, 9999]), "Chuva_mm"] = None
-
     df.loc[df["Chuva_mm"] > 150, "Chuva_mm"] = None
 
     df["prev"] = df["Chuva_mm"].shift(1)
@@ -114,43 +119,28 @@ def carregar_ano(ano):
     )
 
     df.loc[erro, "Chuva_mm"] = None
-
     df = df.drop(columns=["prev", "next"])
 
-    # -------------------------------
-    # INTERVALO
-    # -------------------------------
-
+    # intervalo
     df["intervalo_horas"] = df["TIMESTAMP"].diff().dt.total_seconds() / 3600
-
     df.loc[df["intervalo_horas"] <= 0, "intervalo_horas"] = None
     df.loc[df["intervalo_horas"] > 0.5, "intervalo_horas"] = None
 
     # intensidade
     df["intensidade"] = df["Chuva_mm"] / df["intervalo_horas"]
-
     df.loc[df["intervalo_horas"] == 0, "intensidade"] = None
     df.loc[df["intensidade"] > 500, "intensidade"] = None
 
-    # -------------------------------
-    # ACUMULADO
-    # -------------------------------
-
+    # acumulado
     df["data"] = df["TIMESTAMP"].dt.date
-
-    df["chuva_acumulada"] = (
-        df.groupby("data")["Chuva_mm"]
-        .cumsum()
-    )
+    df["chuva_acumulada"] = df.groupby("data")["Chuva_mm"].cumsum()
 
     df["Ano"] = ano
 
     df.to_csv(csv_file, index=False)
-
     os.remove(xls_file)
 
     return df
-
 
 # -------------------------------
 # SELEÇÃO DE ANOS
@@ -167,10 +157,13 @@ anos = st.multiselect(
 dfs = []
 
 for ano in anos:
-    dfs.append(carregar_ano(ano))
+    df_ano = carregar_ano(ano)
 
+    if not df_ano.empty:
+        dfs.append(df_ano)
+        
 if not dfs:
-    st.warning("Selecione ao menos um ano.")
+    st.error("Nenhum dado foi carregado (servidor pode estar offline).")
     st.stop()
 
 df = pd.concat(dfs, ignore_index=True)
@@ -407,10 +400,10 @@ intervalo = st.selectbox(
 dados = filtro.set_index("TIMESTAMP")
 
 if intervalo == "15 minutos":
-    grafico = dados.resample("15T").mean(numeric_only=True)
+    grafico = dados.resample("15min").mean(numeric_only=True)
 
 elif intervalo == "1 hora":
-    grafico = dados.resample("1H").mean(numeric_only=True)
+    grafico = dados.resample("1h").mean(numeric_only=True)
 
 else:
     grafico = dados.resample("1D").mean(numeric_only=True)
@@ -449,3 +442,4 @@ fig3 = px.bar(
 )
 
 st.plotly_chart(fig3, use_container_width=True)
+
