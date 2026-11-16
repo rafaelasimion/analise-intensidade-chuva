@@ -1,0 +1,68 @@
+name: Atualizar dados
+
+# Toda segunda-feira baixa os dados novos da ESALQ e do INMET e faz commit
+# no repositório (a Vercel publica a nova versão automaticamente).
+# Também dá para rodar na mão: Actions → "Atualizar dados" → Run workflow.
+
+on:
+  schedule:
+    - cron: "17 9 * * 1" # segundas, 06:17 em Brasília
+  workflow_dispatch:
+    inputs:
+      alvo:
+        description: "O que atualizar"
+        type: choice
+        options: [tudo, esalq, inmet]
+        default: tudo
+      anos:
+        description: "Anos específicos separados por espaço (vazio = automático)"
+        required: false
+        default: ""
+      forcar:
+        description: "Baixar de novo mesmo os anos já completos"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: atualizar-dados
+  cancel-in-progress: false
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Baixar e processar
+        env:
+          ALVO: ${{ inputs.alvo || 'tudo' }}
+          ANOS: ${{ inputs.anos }}
+          FORCAR: ${{ inputs.forcar && '--forcar' || '' }}
+        run: |
+          ARGS="$ALVO $FORCAR"
+          if [ -n "$ANOS" ]; then ARGS="$ARGS --anos $ANOS"; fi
+          python scripts/atualizar_dados.py $ARGS
+
+      - name: Salvar no repositório
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dados
+          if git diff --cached --quiet; then
+            echo "Nada novo."
+          else
+            git commit -m "dados: atualização automática $(date -u +%Y-%m-%d)"
+            git push
+          fi
