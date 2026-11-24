@@ -41,10 +41,13 @@ React (Vite)  ──►  /api/*  ──►  FastAPI (função Python da Vercel) 
 Requisitos: Python 3.12+ e Node 20+.
 
 ```bash
+git pull             # traz os dados que a atualização automática grava no GitHub (os do INMET só existem lá)
 pip install -r requirements-dev.txt
 npm install
 npm run dev          # site em http://localhost:5173 e API em http://localhost:8000
 ```
+
+Sem o `git pull`, as estações do INMET aparecem sem dados no seu computador (no site publicado elas aparecem normalmente).
 
 `npm run dev` sobe as duas partes juntas (se o seu Python se chamar `python3`, rode `npm run dev:web` e, em outro terminal, `python3 -m uvicorn api.index:app --reload --port 8000`).
 
@@ -71,7 +74,7 @@ python scripts/atualizar_dados.py tudo
 
 O script registra em `dados/esalq/colunas.json` quais colunas encontrou em cada arquivo da ESALQ e como interpretou cada uma (chuva, vento, temperatura…). A mesma informação aparece em `/api/esalq/diagnostico`. Se o nome de alguma coluna mudar, o ajuste é em `hidro/esalq.py` (`_classificar_coluna`).
 
-Os arquivos antigos da ESALQ (1997–2016) têm outro formato: bloco de título, legenda com as unidades ("UR = Umidade Relativa (%)") e colunas de ano, dia juliano e hora. O leitor entende os dois formatos e recusa gravar um arquivo se não achar a coluna de chuva ou se as datas não caírem no ano do arquivo; nesse caso o motivo aparece no log da atualização.
+Os arquivos antigos da ESALQ (1997–2016) têm outro formato: bloco de título, às vezes uma legenda ("UR = Umidade Relativa (%)"), cabeçalho com dia juliano e hora (HHMM) e unidades na linha de baixo, sem coluna de ano. O de 2016 tem dois blocos: o formato antigo até março e um bloco TOA5 depois da troca da estação. O leitor entende todos esses casos (conferido com os arquivos de 1997, 2005 e 2016) e recusa gravar um arquivo se não achar a coluna de chuva ou se as datas não caírem no ano do arquivo; nesse caso o motivo aparece no log da atualização.
 
 ## Usar no R
 

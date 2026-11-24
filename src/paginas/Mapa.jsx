@@ -58,8 +58,9 @@ function periodoDoMapa(params, ref) {
     };
   }
   if (modo === 'outro') {
-    const fim = params.get('fim') ?? fimRef;
-    const inicio = params.get('inicio') ?? isoData(new Date(paraData(fim).getTime() - 29 * 86400000));
+    const valida = (t) => (t && /^\d{4}-\d{2}-\d{2}$/.test(t) && !Number.isNaN(paraData(t).getTime()) ? t : null);
+    const fim = valida(params.get('fim')) ?? fimRef;
+    const inicio = valida(params.get('inicio')) ?? isoData(new Date(paraData(fim).getTime() - 29 * 86400000));
     return { modo, inicio, fim, texto: periodoExtenso(inicio, fim) };
   }
   const [a, m] = (params.get('mes') ?? `${aRef}-${doisDig(mRef)}`).split('-').map(Number);
@@ -480,9 +481,16 @@ function PainelDoPosto({ p, periodo }) {
       {r && (
         <div className={carregando ? 'esmaecido' : undefined}>
           {r.chuva_total_mm === null ? (
-            <Aviso tipo="info" titulo="Sem dados neste período">
-              Os dados deste posto vão de {dataBR(p.inicio_dados)} a {dataBR(p.fim_dados)}.
-            </Aviso>
+            p.tem_dados ? (
+              <Aviso tipo="info" titulo="Sem dados neste período">
+                Os dados deste posto vão de {dataBR(p.inicio_dados)} a {dataBR(p.fim_dados)}.
+              </Aviso>
+            ) : (
+              <Aviso tipo="atencao" titulo="Ainda não há dados deste posto no site">
+                Os dados do INMET entram pela atualização automática. Rodando no seu computador, traga os dados com{' '}
+                <code>git pull</code>.
+              </Aviso>
+            )
           ) : (
             <>
               <p className="lado__total">

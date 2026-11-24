@@ -64,7 +64,12 @@ def _ler_tabela_bruta(conteudo: bytes) -> pd.DataFrame:
     # XLS (OLE2) ou XLSX (zip)
     if inicio.startswith(b"\xd0\xcf\x11\xe0") or inicio.startswith(b"PK"):
         try:
-            return pd.read_excel(io.BytesIO(conteudo), header=None, dtype=object)
+            abas = pd.read_excel(io.BytesIO(conteudo), header=None, dtype=object, sheet_name=None)
+            abas = [a for a in abas.values() if not a.empty]
+            if not abas:
+                raise ValueError("planilha vazia")
+            # Abas uma embaixo da outra (cada uma com o seu cabeçalho, se tiver)
+            return pd.concat(abas, ignore_index=True) if len(abas) > 1 else abas[0]
         except Exception as exc:  # noqa: BLE001
             erros.append(f"excel: {exc}")
 
@@ -128,20 +133,40 @@ def _papel_tempo(nome: Any) -> str | None:
     return None
 
 
+def _eh_cabecalho(celulas: list) -> bool:
+    """Linha de nomes de colunas: TIMESTAMP (TOA5) ou colunas de tempo dos formatos antigos.
+
+    A linha de legenda ("Dia Jul = Dia juliano") não conta: o texto não é só o nome.
+    """
+    celulas = [v for v in celulas if pd.notna(v) and str(v).strip()]
+    if any(_norm(v).startswith("timestamp") for v in celulas):
+        return True
+    papeis = {_papel_tempo(v) for v in celulas}
+    return len(celulas) >= 3 and "hora" in papeis and bool(papeis & {"data", "dia"})
+
+
+def _linhas_de_cabecalho(bruto: pd.DataFrame) -> list[int]:
+    """Todas as linhas de cabeçalho do arquivo.
+
+    Alguns arquivos têm mais de um bloco: o de 2016 traz o formato antigo até
+    março e, depois da troca da estação, um bloco TOA5 com cabeçalho próprio.
+    """
+    if bruto.empty:
+        return []
+    nomes_tempo = {n for nomes in _NOMES_TEMPO.values() for n in nomes}
+    candidatas = pd.Series(False, index=bruto.index)
+    for c in bruto.columns[: min(4, bruto.shape[1])]:
+        t = (
+            bruto[c].astype(str).str.normalize("NFKD").str.encode("ascii", "ignore").str.decode("ascii")
+            .str.lower().str.replace(r"[^a-z0-9]+", "_", regex=True).str.strip("_")
+        )
+        candidatas |= t.str.startswith("timestamp") | t.isin(nomes_tempo) | t.str.startswith(("dia_jul", "julian"))
+    return [int(i) for i in np.flatnonzero(candidatas.to_numpy()) if _eh_cabecalho(bruto.iloc[i].tolist())]
+
+
 def _achar_linha_cabecalho(bruto: pd.DataFrame) -> int | None:
-    limite = min(len(bruto), 80)
-    for i in range(limite):
-        valores = [_norm(v) for v in bruto.iloc[i].tolist()]
-        if any(v.startswith("timestamp") for v in valores):
-            return i
-    # Formatos antigos: data + hora, ou (ano +) dia juliano + hora. A linha de
-    # legenda ("Dia Jul = Dia juliano") não conta porque o texto não é só o nome.
-    for i in range(limite):
-        celulas = [v for v in bruto.iloc[i].tolist() if pd.notna(v) and str(v).strip()]
-        papeis = {_papel_tempo(v) for v in celulas}
-        if len(celulas) >= 3 and "hora" in papeis and papeis & {"data", "dia"}:
-            return i
-    return None
+    linhas = _linhas_de_cabecalho(bruto)
+    return linhas[0] if linhas else None
 
 
 def _legenda(bruto: pd.DataFrame, ate: int) -> dict[str, tuple[str, str]]:
@@ -210,7 +235,10 @@ def _minutos_do_dia(serie: pd.Series) -> pd.Series:
         return serie.map(lambda v: v.hour * 60 + v.minute + v.second / 60 if isinstance(v, (dt_time, datetime)) else np.nan)
 
     num = pd.to_numeric(serie, errors="coerce")
-    if num.notna().mean() > 0.8:
+    preenchidas = int((serie.notna() & (serie.astype(str).str.strip() != "")).sum())
+    # Numérica se a maioria das células preenchidas for número (sobram linhas de texto
+    # entre os blocos, como "Trocada a estação automática")
+    if num.notna().any() and num.notna().sum() >= 0.5 * preenchidas:
         validos = num.dropna()
         if validos.max() <= 1.0001 and (validos % 1 != 0).any():
             return (num * 1440).round(3)
@@ -251,7 +279,12 @@ def _timestamp_de_colunas(df: pd.DataFrame, ano_arquivo: int | None = None) -> p
         ano = pd.to_numeric(df[cols["ano"]], errors="coerce")
         ano = ano.where(ano >= 100, ano + np.where(ano < 70, 2000, 1900))  # "05" -> 2005
     elif ano_arquivo is not None:
-        ano = pd.Series(float(ano_arquivo), index=df.index)
+        # Sem coluna de ano: o dia juliano que volta de ~365 para 1 marca a virada do
+        # ano (o arquivo de 2016 começa com o registro de 23:45 de 31/12/2015).
+        virada = (dia.ffill().diff() < -300).cumsum()
+        validos = virada[dia.notna()]
+        mais_comum = int(validos.mode().iloc[0]) if len(validos) else 0
+        ano = (ano_arquivo - mais_comum + virada).astype(float)
     else:
         return None
     ano_txt = ano.astype("Int64").astype(str)
@@ -277,10 +310,16 @@ _EXCLUI_TEMP = (
 _EXCLUI_DP = ("std", "sd", "desv", "desvio", "sigma", "dp")
 
 
-def _classificar_coluna(nome: str, unidade: str) -> tuple[str | None, int]:
+# Descrições da legenda que indicam outra grandeza (temperatura do bulbo úmido, do solo…)
+_EXCLUI_DESCRICAO_TEMP = ("umido", "orvalho", "solo", "molhado", "globo", "agua", "painel", "interna")
+
+
+def _classificar_coluna(nome: str, unidade: str, descricao: str = "") -> tuple[str | None, int]:
     """Retorna (variável normalizada, prioridade) para uma coluna bruta."""
     tk = _tokens(nome)
     un = _norm(unidade)
+    ut = _tokens(unidade)
+    desc = _norm(descricao)
     if not tk:
         return None, 0
     junto = "".join(tk)
@@ -300,9 +339,11 @@ def _classificar_coluna(nome: str, unidade: str) -> tuple[str | None, int]:
         prioridade = 3 if _tem(tk, "tot", "mm", "total") else 2
         return "chuva_mm", prioridade
 
-    # Direção do vento (antes da velocidade). Na ESALQ: Dvento_G, Dvento_D1_WVT
+    # Direção do vento (antes da velocidade). Na ESALQ: Dvento_G, Dvento_D1_WVT; em 1997 a
+    # coluna se chama só "Vento" e a unidade é "Dir(g)"
     if (_tem(tk, "dir", "wd", "direcao", "winddir") or _tem(tk, "dv", prefixo=False)
-            or junto.startswith(("dvento", "dirvento", "ddv"))):
+            or junto.startswith(("dvento", "dirvento", "ddv"))
+            or (_tem(ut, "dir", prefixo=False) and ("vento" in junto or "wind" in junto))):
         if eh_dp:
             return None, 0
         # D1 do WindVector = direção média vetorial do intervalo (melhor que a instantânea)
@@ -343,9 +384,9 @@ def _classificar_coluna(nome: str, unidade: str) -> tuple[str | None, int]:
             return None, 0
         return "rad_w_m2", 2
 
-    # Pressão
+    # Pressão atmosférica (não a pressão de vapor: "es", "ea", "DPV" dos arquivos antigos)
     if _tem(tk, "press", "pressao", "bp", "patm", "pressure", "baro", "pa", prefixo=False) or junto.startswith(("press", "baro", "bp")):
-        if eh_max or eh_min or eh_dp:
+        if eh_max or eh_min or eh_dp or any(e in junto + "_" + desc for e in ("satur", "vapor", "dpv", "deficit")):
             return None, 0
         return "pressao_hpa", 2
 
@@ -358,6 +399,9 @@ def _classificar_coluna(nome: str, unidade: str) -> tuple[str | None, int]:
     )
     if eh_temp:
         if any(e in junto for e in _EXCLUI_TEMP) or eh_dp:
+            return None, 0
+        # "Tu" (bulbo úmido), "To"/"Td" (ponto de orvalho) e o que a legenda descrever como tal
+        if junto in ("tu", "to", "td", "tpo", "tw") or any(e in desc for e in _EXCLUI_DESCRICAO_TEMP):
             return None, 0
         if eh_max:
             return "temp_max_c", 2
@@ -464,28 +508,18 @@ def _eh_linha_de_texto(linha: pd.Series) -> bool:
     return numeros.notna().mean() < 0.2
 
 
-def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[pd.DataFrame, dict]:
-    """Lê o arquivo da estação e devolve (dados normalizados, info).
-
-    O DataFrame tem as colunas de `config.COLUNAS_15MIN` (as que não existirem
-    no arquivo ficam vazias). `ano_arquivo` só é usado se o arquivo não tiver
-    a coluna do ano (formatos antigos com dia juliano + hora).
-    """
-    bruto = _ler_tabela_bruta(conteudo)
-    linha_cab = _achar_linha_cabecalho(bruto)
-    if linha_cab is None:
-        raise ValueError("Cabeçalho não encontrado (nem TIMESTAMP, nem colunas de data/dia e hora)")
-
-    nomes = _nomes_unicos(bruto.iloc[linha_cab].tolist())
-    corpo = bruto.iloc[linha_cab + 1:].reset_index(drop=True)
+def _ler_bloco(bloco: pd.DataFrame, legenda: dict, ano_arquivo: int | None) -> tuple[pd.DataFrame, dict]:
+    """Lê um bloco de dados (a 1ª linha é o cabeçalho)."""
+    nomes = _nomes_unicos(bloco.iloc[0].tolist())
+    corpo = bloco.iloc[1:].reset_index(drop=True)
     corpo.columns = nomes
-    legenda = _legenda(bruto, linha_cab)
 
-    # Linha de unidades logo após o cabeçalho (TOA5: "TS" na coluna TIMESTAMP)
+    # Linha de unidades logo após o cabeçalho (TOA5: "TS" na coluna TIMESTAMP; antigos: "oC", "W/m2"…)
     unidades = {n: "" for n in nomes}
     if len(corpo) > 0 and _eh_linha_de_texto(corpo.iloc[0]):
         unidades = {n: ("" if pd.isna(corpo.at[0, n]) else str(corpo.at[0, n]).strip()) for n in nomes}
-    # Formatos antigos: unidades na legenda acima do cabeçalho ("UR = Umidade Relativa (%)")
+        corpo = corpo.iloc[1:].reset_index(drop=True)
+    # Formatos antigos: descrição (e unidade) na legenda acima do cabeçalho ("UR = Umidade Relativa (%)")
     descricoes: dict[str, str] = {}
     for n in nomes:
         item = legenda.get(_norm(n))
@@ -496,13 +530,12 @@ def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[
 
     data_hora = _timestamp_de_colunas(corpo, ano_arquivo)
     if data_hora is None:
-        raise ValueError("Não foi possível montar a data/hora dos registros")
+        raise ValueError("não foi possível montar a data/hora dos registros")
 
     corpo = corpo.assign(_dh=data_hora).dropna(subset=["_dh"])
     corpo = corpo.sort_values("_dh").drop_duplicates("_dh", keep="last").reset_index(drop=True)
-
     if corpo.empty:
-        raise ValueError("Nenhum registro com data/hora válida")
+        raise ValueError("nenhum registro com data/hora válida")
 
     dt_s = corpo["_dh"].diff().dt.total_seconds().mode()
     dt_s = float(dt_s.iloc[0]) if len(dt_s) and dt_s.iloc[0] > 0 else 900.0
@@ -512,10 +545,10 @@ def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[
     for n in nomes:
         if n == "_dh" or _papel_tempo(n):
             continue
-        var, prioridade = _classificar_coluna(n, unidades.get(n, ""))
+        var, prioridade = _classificar_coluna(n, unidades.get(n, ""), descricoes.get(n, ""))
         if var is None and n in descricoes:
             # Sigla desconhecida: tenta pela descrição da legenda (prioridade menor)
-            var, prioridade = _classificar_coluna(descricoes[n], unidades.get(n, ""))
+            var, prioridade = _classificar_coluna(descricoes[n], unidades.get(n, ""), descricoes[n])
             prioridade -= 1
         if var is None:
             continue
@@ -529,7 +562,6 @@ def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[
     saida = pd.DataFrame({"data_hora": corpo["_dh"].values})
     mapeamento: dict[str, str] = {}
     conversoes: dict[str, str] = {}
-
     for var in COLUNAS_15MIN[1:]:
         if var not in candidatos:
             saida[var] = np.nan
@@ -547,7 +579,7 @@ def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[
         saida[var] = limpar_variavel(var, valores).values
 
     info = {
-        "colunas_brutas": [n for n in nomes if n != "_dh"],
+        "colunas_brutas": [n for n in nomes if n != "_dh" and not n.startswith("col")],
         "unidades": {k: v for k, v in unidades.items() if v},
         "legenda": descricoes,
         "mapeamento": mapeamento,
@@ -558,6 +590,61 @@ def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[
         "fim": saida["data_hora"].max().isoformat(),
     }
     return saida, info
+
+
+def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[pd.DataFrame, dict]:
+    """Lê o arquivo da estação e devolve (dados normalizados, info).
+
+    O DataFrame tem as colunas de `config.COLUNAS_15MIN` (as que não existirem
+    no arquivo ficam vazias). `ano_arquivo` só é usado se o arquivo não tiver
+    a coluna do ano (formatos antigos com dia juliano + hora).
+
+    Um arquivo pode ter vários blocos, cada um com o seu cabeçalho (o de 2016
+    muda do formato antigo para o TOA5 quando a estação foi trocada).
+    """
+    bruto = _ler_tabela_bruta(conteudo)
+    cabecalhos = _linhas_de_cabecalho(bruto)
+    if not cabecalhos:
+        raise ValueError("Cabeçalho não encontrado (nem TIMESTAMP, nem colunas de data/dia e hora)")
+    legenda = _legenda(bruto, cabecalhos[0])
+
+    partes, infos, erros = [], [], []
+    for k, ini in enumerate(cabecalhos):
+        fim = cabecalhos[k + 1] if k + 1 < len(cabecalhos) else len(bruto)
+        try:
+            df_b, info_b = _ler_bloco(bruto.iloc[ini:fim].reset_index(drop=True), legenda, ano_arquivo)
+        except ValueError as exc:
+            erros.append(f"bloco da linha {ini + 1}: {exc}")
+            continue
+        info_b["linha_cabecalho"] = ini + 1
+        partes.append(df_b)
+        infos.append(info_b)
+    if not partes:
+        raise ValueError("; ".join(erros))
+
+    df = pd.concat(partes, ignore_index=True) if len(partes) > 1 else partes[0]
+    df = df.sort_values("data_hora").drop_duplicates("data_hora", keep="last").reset_index(drop=True)
+
+    # O bloco com mais registros descreve o arquivo; as variáveis encontradas são a soma dos blocos
+    principal = max(infos, key=lambda i: i["registros"])
+    mapeamento: dict[str, str] = {}
+    for i in sorted(infos, key=lambda i: i["registros"]):
+        mapeamento.update(i["mapeamento"])
+    info = {
+        **principal,
+        "mapeamento": {v: mapeamento[v] for v in COLUNAS_15MIN[1:] if v in mapeamento},
+        "registros": int(len(df)),
+        "inicio": df["data_hora"].min().isoformat(),
+        "fim": df["data_hora"].max().isoformat(),
+    }
+    if len(infos) > 1:
+        info["blocos"] = [
+            {k: i[k] for k in ("linha_cabecalho", "registros", "inicio", "fim", "intervalo_s", "mapeamento")}
+            for i in infos
+        ]
+    if erros:
+        info["avisos"] = erros
+    return df, info
 
 
 # ---------------------------------------------------------------------------

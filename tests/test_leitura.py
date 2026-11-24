@@ -148,59 +148,122 @@ def test_colunas_reais_da_esalq():
     assert df["vento_max_ms"].isna().all()  # a ESALQ não registra rajada na tabela de 15 min
 
 
-def _arquivo_antigo(com_ano=True) -> bytes:
-    """Imita o layout dos arquivos de 1997–2016: bloco de título, legenda com unidades e cabeçalho
-    com ano, dia juliano e hora (HHMM), sem linha de unidades."""
+def _xls(linhas) -> bytes:
+    buf = io.BytesIO()
+    pd.DataFrame(linhas).to_excel(buf, header=None, index=False)
+    return buf.getvalue()
+
+
+def _horas(n, inicio=15):
+    """HHMM de n registros de 15 min a partir de `inicio` (15 = 00:15)."""
+    saida, m = [], (inicio // 100) * 60 + inicio % 100
+    for _ in range(n):
+        saida.append((m // 60) * 100 + m % 60)
+        m += 15
+    return saida
+
+
+def _arquivo_1997() -> bytes:
+    """Layout de 1997: título em maiúsculas, cabeçalho "Dia Juliano/Horario", unidades na linha
+    de baixo e duas colunas chamadas "Vento" (velocidade e direção)."""
+    vazio = [None] * 11
+    linhas = [["DEPARTAMENTO DE FISICA E METEOROLOGIA"] + vazio[1:], vazio,
+              ["DADOS METEOROLOGICOS DIARIOS (15 MINUTOS)"] + vazio[1:], vazio,
+              [None] * 6 + ["* (g) = graus e decimos; (mmol) = micromol/m2.seg"] + [None] * 4, vazio,
+              ["Dia Juliano", "Horario", "Tar", "UR", "Vento", "Vento", "Rad.Solar", "PAR", "Rad.Liq.", "Niv Tanq", "Chuva"],
+              [None, None, "(oC)", "(%)", "Vel(m/s)", "Dir(g)*", "(W/m2)", "(mmol)*", "(W/m2)", "  (mm)", "(mm)"], vazio]
+    for i, hh in enumerate(_horas(96)):
+        linhas.append([1, hh, 21.0, 77.0, 2.5, 140.0, 0, 0, -20.0, None, 1.0 if i == 40 else 0])
+    return _xls(linhas)
+
+
+def _arquivo_2005() -> bytes:
+    """Layout de 2005: legenda "SIGLA = descrição (unidade)", cabeçalho em duas linhas (Dia/Jul,
+    Horas/min) e colunas que não são a temperatura do ar (Tu, To) nem a pressão atmosférica (es, ea)."""
     n = 19
     vazio = [None] * n
 
     def linha(**cols):
         lin = list(vazio)
-        for i, v in cols.items():
-            lin[int(i[1:])] = v
+        for k, v in cols.items():
+            lin[int(k[1:])] = v
         return lin
 
-    linhas = [
-        linha(c0="Departamento de Ciências Exatas"),
-        linha(c0='Escola Superior de Agricultura "Luiz de Queiroz"'),
-        linha(c0="Universidade de São Paulo"),
-        linha(c0="Estação Meteorológica Automática"),
-        linha(c0="Local: Piracicaba (SP)   Lat: 22G42'30\" S    Long: 47G38'00\" W    Alt: 546m"),
-        list(vazio),
-        linha(c0="Legenda:"),
-        linha(c0="Dia Jul = Dia juliano", c7="PAR = Radiação fotossintéticamente ativa (μmol/m2.s)",
-              c15="UR = Umidade Relativa (%)"),
-        linha(c0="Rg = Radiação global (kW/m2)", c7="Rn = Saldo de radiação (W/m2)", c15="Tar = Temperatura do ar (°C)"),
-        linha(c0="Vv = Velocidade do vento (km/h)", c7="Dv = Direção do vento (graus)", c15="P = Pressão (kPa)"),
-        list(vazio),
-    ]
-    nomes = ["Ano", "Dia Jul", "Hora", "Rg", "PAR", "Rn", "Tar", "Tmax", "Tmin", "UR", "Vv", "Dv", "P", "Chuva",
-             "Tsolo", "Bat", "X1", "X2", "X3"]
-    if not com_ano:
-        nomes[0] = "Prog"
-    linhas.append(nomes)
-    for i in range(48):  # dois dias de registros horários (HHMM, fim do intervalo; 2400 = meia-noite)
-        dj, hh = 32 + i // 24, (i % 24) + 1
-        linhas.append([2005 if com_ano else 101, dj, hh * 100, 0.5, 900, 300, 25.0, 25.5, 24.5, 70, 7.2, 180, 94.5,
-                       2.0 if (dj, hh) == (32, 15) else 0.0, 22, 12.8, 0, 0, 0])
-    buf = io.BytesIO()
-    pd.DataFrame(linhas).to_excel(buf, header=False, index=False)
-    return buf.getvalue()
+    linhas = [linha(c0="Departamento de Ciências Exatas"), linha(c0="Estação Meteorológica Automática"), vazio,
+              linha(c0="Legenda:"),
+              linha(c0="Dia Jul = Dia juliano", c7="PAR = Radiação fotossintéticamente ativa (μmol/m2.s)",
+                    c15="UR = Umidade Relativa (%)"),
+              linha(c0="Horas = Horas (min)", c7="es = pressão de saturação (kPa)",
+                    c15="DPV = Déficit de pressão do vapor do ar (kPa)"),
+              linha(c0="Tar = Temperatura do ar (oC)", c7="Tu = Temperatura do bulbo úmido (oC)",
+                    c15="Precip = Intensidade de chuva (mm)"),
+              linha(c0="Rad. Solar = Radiação solar (W/m2)", c7="To = Temperatura do ponto de orvalho (oC)"), vazio,
+              ["Dia", "Horas", "Tar", "Vento", "Dir Ven", "Desv. Pad.", "Rad. Solar", "PAR", "F.C.S.", "Rad.Liq.",
+               " es", " ea", "Tu", "To", "UR", "  DPV", "Niv Tanq", "Rad Epp", "Precip"],
+              ["Jul", "min", "oC", "m/s", "graus", "Dir Ven", "W/m2", "μmol/m2.s", " W/m2", " W/m2", " kPa", " kPa",
+               "oC", "oC", "%", " kPa", "  mm", "W/m2", "mm"], vazio]
+    for i, hh in enumerate(_horas(96)):
+        linhas.append([1, hh, 25.0, 1.2, 110.0, 15.0, 0, 0, None, -25.0, 3.0, 2.5, 22.0, 21.0, 85.0, 0.4, 128.6,
+                       None, 0.5 if i < 4 else 0])
+    return _xls(linhas)
 
 
-@pytest.mark.parametrize("com_ano", [True, False])
-def test_le_formato_antigo_da_esalq(com_ano):
-    df, info = ler_arquivo_esalq(_arquivo_antigo(com_ano), ano_arquivo=2005)
-    assert info["mapeamento"] == {
-        "chuva_mm": "Chuva", "temp_c": "Tar", "temp_max_c": "Tmax", "temp_min_c": "Tmin", "ur_pct": "UR",
-        "vento_ms": "Vv", "vento_dir_graus": "Dv", "rad_w_m2": "Rg", "pressao_hpa": "P",
-    }
-    # 32º dia juliano = 1º/fev; 2400 = 00:00 do dia seguinte
-    assert df["data_hora"].iloc[0] == pd.Timestamp("2005-02-01 01:00")
-    assert df["data_hora"].iloc[23] == pd.Timestamp("2005-02-02 00:00")
-    assert info["intervalo_s"] == 3600
-    # unidades da legenda: kW/m² -> W/m², km/h -> m/s, kPa -> hPa
-    assert df["rad_w_m2"].iloc[0] == pytest.approx(500)
-    assert df["vento_ms"].iloc[0] == pytest.approx(2.0)
-    assert df["pressao_hpa"].iloc[0] == pytest.approx(945)
+def _arquivo_2016() -> bytes:
+    """Layout de 2016: formato antigo que começa em 31/12 do ano anterior ("365 2345", "1 0"…) e,
+    depois da troca da estação, um bloco TOA5 completo."""
+    linhas = [["Departamento de Engenharia de Biossistemas"] + [None] * 7,
+              ["Dia", "Horas", "Tar", "Vento", "Dir Ven", "UR", "Precip", None],
+              ["Jul", "min", "oC", "m/s", "graus", "%", "mm", None]]
+    linhas.append([365, 2345, 24.0, 0.2, 70.0, 100.0, 0, None])
+    for i, hh in enumerate(_horas(8, inicio=0)):
+        linhas.append([1, hh, 24.5, 0.3, 80.0, 99.0, 2.0 if i == 1 else 0, None])
+    linhas += [["Trocada a estação automática"] + [None] * 7, [None] * 8,
+               ["TOA5", "POSTO_CR1000", "CR1000", 75696, None, None, None, None],
+               ["TIMESTAMP", "RECORD", "Tar_AVG", "UR_inst", "Vvento_ms_AVG", "Dvento_D1_WVT", "Chuva_mm", "Patm_kPa_AVG"],
+               ["TS", "RN", "Deg C", "%", "meters/second", "Deg", "mm", "kPa"],
+               [None, None, "Avg", "Smp", "Avg", "WVc", "Tot", "Avg"]]
+    for i, t in enumerate(pd.date_range("2016-04-06 09:30", periods=8, freq="15min")):
+        linhas.append([t.to_pydatetime(), 471 + i, 23.7, 73.0, 1.2, 63.0, 0.254 if i == 2 else 0, 94.8])
+    return _xls(linhas)
+
+
+def test_formato_de_1997():
+    df, info = ler_arquivo_esalq(_arquivo_1997(), ano_arquivo=1997)
+    assert info["mapeamento"] == {"chuva_mm": "Chuva", "temp_c": "Tar", "ur_pct": "UR", "vento_ms": "Vento",
+                                  "vento_dir_graus": "Vento__1", "rad_w_m2": "Rad.Solar"}
+    assert df["data_hora"].iloc[0] == pd.Timestamp("1997-01-01 00:15")
+    assert df["data_hora"].iloc[-1] == pd.Timestamp("1997-01-02 00:00")  # 2400 = meia-noite
+    assert df["vento_dir_graus"].iloc[0] == pytest.approx(140) and df["vento_ms"].iloc[0] == pytest.approx(2.5)
+    assert df["chuva_mm"].sum() == pytest.approx(1.0)
+
+
+def test_formato_de_2005():
+    df, info = ler_arquivo_esalq(_arquivo_2005(), ano_arquivo=2005)
+    assert info["mapeamento"] == {"chuva_mm": "Precip", "temp_c": "Tar", "ur_pct": "UR", "vento_ms": "Vento",
+                                  "vento_dir_graus": "Dir Ven", "rad_w_m2": "Rad. Solar"}
+    assert info["intervalo_s"] == 900 and len(df) == 96
+    assert df["temp_c"].iloc[0] == pytest.approx(25.0)  # não pegou Tu (22) nem To (21)
+    assert df["pressao_hpa"].isna().all()  # "es" e "ea" são pressão de vapor
     assert df["chuva_mm"].sum() == pytest.approx(2.0)
+
+
+def test_formato_de_2016_com_dois_blocos():
+    df, info = ler_arquivo_esalq(_arquivo_2016(), ano_arquivo=2016)
+    assert [b["registros"] for b in info["blocos"]] == [9, 8]
+    # o registro "365 2345" é de 31/12/2015; "1 0" é a meia-noite (fim de 31/12)
+    assert df["data_hora"].iloc[0] == pd.Timestamp("2015-12-31 23:45")
+    assert df["data_hora"].iloc[1] == pd.Timestamp("2016-01-01 00:00")
+    assert df["data_hora"].iloc[-1] == pd.Timestamp("2016-04-06 11:15")
+    assert info["mapeamento"]["pressao_hpa"] == "Patm_kPa_AVG"
+    assert df["chuva_mm"].sum() == pytest.approx(2.254)
+    assert df.loc[df["data_hora"] >= "2016-04-06", "pressao_hpa"].iloc[0] == pytest.approx(948)
+
+
+def test_arquivo_antigo_sem_coluna_de_ano_precisa_do_ano():
+    with pytest.raises(ValueError):
+        ler_arquivo_esalq(_arquivo_2005())  # sem o ano do arquivo não dá para montar a data
+
+
+def _arquivo_antigo() -> bytes:
+    """Arquivo de 2005 (o formato antigo mais comum), usado também nos testes do script."""
+    return _arquivo_2005()

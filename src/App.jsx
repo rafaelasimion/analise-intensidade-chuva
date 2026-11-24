@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router';
+import { BarreiraDeErro } from './componentes/Comuns.jsx';
 import { NOME_CURTO, SITE } from './config.js';
 import { ultimoPosto } from './meta.jsx';
 import Balanco from './paginas/Balanco.jsx';
@@ -76,6 +77,8 @@ export default function App() {
       </header>
 
       <main id="conteudo" className="principal" tabIndex={-1}>
+        {/* Recomeça ao mudar de página (as abas de um posto contam como a mesma página) */}
+        <BarreiraDeErro key={naPagina ? local.pathname.split('/').slice(0, 3).join('/') : local.pathname}>
         <Routes>
           <Route path="/" element={<Mapa />} />
           <Route path="/posto/:id" element={<Posto />}>
@@ -95,6 +98,7 @@ export default function App() {
           <Route path="/postos" element={<Redireciona para="/" />} />
           <Route path="*" element={<NaoEncontrada />} />
         </Routes>
+        </BarreiraDeErro>
       </main>
 
       <footer className="rodape">

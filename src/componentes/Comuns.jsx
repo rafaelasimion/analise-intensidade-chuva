@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react';
+import { Component, useEffect, useId, useState } from 'react';
 import { dataBR, dataHoraBR, duracao, num, paraData } from '../formato.js';
 import { useMeta } from '../meta.jsx';
 
@@ -297,11 +297,18 @@ function SituacaoDados({ meta, atualizar, atualizando }) {
   if (!meta) return null;
   const fim = meta.limites?.fim;
   if (meta.posto?.fonte !== 'esalq') {
+    const ultimo = paraData(fim);
     return (
       <p className="situacao">
         <span>
-          Dados até <strong>{dataBR(new Date(paraData(fim).getTime() - 1000))}</strong>. O INMET publica os dados das
-          estações uma vez por mês; o site confere toda semana se há pacote novo.
+          {ultimo ? (
+            <>
+              Dados até <strong>{dataBR(new Date(ultimo.getTime() - 1000))}</strong>.{' '}
+            </>
+          ) : (
+            'Ainda não há dados desta estação no site. '
+          )}
+          O INMET publica os dados das estações uma vez por mês; o site confere toda semana se há pacote novo.
         </span>
       </p>
     );
@@ -348,4 +355,44 @@ export function IntroAba({ titulo, children }) {
 
 export function Carregando({ texto = 'Carregando…' }) {
   return <p className="carregando" role="status">{texto}</p>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Barreira de erro                                                   */
+/* ------------------------------------------------------------------ */
+
+/** Se uma página quebrar, mostra o erro no lugar dela em vez de deixar o site em branco. */
+export class BarreiraDeErro extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { erro: null };
+  }
+
+  static getDerivedStateFromError(erro) {
+    return { erro };
+  }
+
+  componentDidCatch(erro, info) {
+    console.error('Erro na página:', erro, info?.componentStack);
+  }
+
+  render() {
+    if (!this.state.erro) return this.props.children;
+    return (
+      <div className="pagina">
+        <Aviso
+          tipo="erro"
+          titulo="Esta página encontrou um erro"
+          acao={
+            <button type="button" className="botao" onClick={() => window.location.reload()}>
+              Recarregar
+            </button>
+          }
+        >
+          Tente recarregar. Se o erro continuar, mande esta mensagem para quem mantém o site:{' '}
+          <code>{String(this.state.erro?.message ?? this.state.erro)}</code>
+        </Aviso>
+      </div>
+    );
+  }
 }

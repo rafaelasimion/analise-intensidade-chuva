@@ -161,18 +161,19 @@ def test_ano_seguinte_parcial_nao_conta_como_baixado(script, monkeypatch, tmp_pa
 
 
 def test_recusa_arquivo_com_datas_fora_do_ano(script, monkeypatch, tmp_path):
-    """Um arquivo antigo lido com a data errada não é gravado."""
+    """Um arquivo cujas datas não caem no ano pedido não é gravado."""
     from tests.test_leitura import _arquivo_antigo
 
-    monkeypatch.setattr(script, "baixar", lambda url, **_: _arquivo_antigo() if "2004" in url else None)
-    script.atualizar_esalq([2004], desde=2004, forcar=True)  # o arquivo é de 2005
+    # o arquivo do teste TOA5 é de 2026, mas veio no endereço de 2004
+    monkeypatch.setattr(script, "baixar", lambda url, **_: _arquivo_esalq("xlsx") if "2004" in url else None)
+    script.atualizar_esalq([2004], desde=2004, forcar=True)
     assert not (tmp_path / "esalq" / "esalq_2004.csv.gz").exists()
-    assert not (tmp_path / "esalq" / "esalq_2005.csv.gz").exists()
+    assert not (tmp_path / "esalq" / "esalq_2026.csv.gz").exists()
 
     monkeypatch.setattr(script, "baixar", lambda url, **_: _arquivo_antigo() if "2005" in url else None)
     script.atualizar_esalq([2005], desde=2005, forcar=True)
     df = pd.read_csv(tmp_path / "esalq" / "esalq_2005.csv.gz", parse_dates=["data_hora"])
-    assert len(df) == 48 and df["chuva_mm"].sum() == pytest.approx(2.0)
+    assert len(df) == 96 and df["chuva_mm"].sum() == pytest.approx(2.0)
 
 
 def test_diario_refeito_preserva_dias_sem_horario(script, monkeypatch, tmp_path):

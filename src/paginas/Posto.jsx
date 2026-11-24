@@ -21,11 +21,18 @@ export default function Posto() {
     <ProvedorPosto id={id}>
       <div className="pagina">
         <CabecalhoPosto />
-        {/* key: ao trocar de posto, as abas recomeçam (filtros, página da tabela…) */}
-        <Outlet key={id} />
+        <ConteudoPosto id={id} />
       </div>
     </ProvedorPosto>
   );
+}
+
+/** As abas só aparecem se o posto tiver algum dado (senão o aviso do cabeçalho basta). */
+function ConteudoPosto({ id }) {
+  const { posto } = useMeta();
+  if (posto && !posto.tem_dados) return null;
+  // key: ao trocar de posto, as abas recomeçam (filtros, página da tabela…)
+  return <Outlet key={id} />;
 }
 
 function CabecalhoPosto() {
@@ -106,7 +113,13 @@ function CabecalhoPosto() {
           {erro.message} Escolha outro posto na lista acima ou no <Link to="/">mapa</Link>.
         </Aviso>
       )}
-      {meta?.aviso && (
+      {posto && !posto.tem_dados && (
+        <Aviso tipo="atencao" titulo="Ainda não há dados desta estação no site">
+          Os dados do INMET entram pela atualização automática (no GitHub: Actions → Atualizar dados). Se você está
+          rodando o site no seu computador, traga os dados que ela gravou com <code>git pull</code>.
+        </Aviso>
+      )}
+      {posto?.tem_dados && meta?.aviso && (
         <Aviso tipo="info" titulo="Só os totais diários por enquanto">
           Os dados horários desta estação entram no site na próxima atualização automática (veja{' '}
           <Link to="/metodos">Métodos</Link>). Até lá, o painel e os relatórios usam os totais diários.
