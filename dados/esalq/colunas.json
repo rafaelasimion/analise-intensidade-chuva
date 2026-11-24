@@ -534,7 +534,7 @@
   }
  },
  "2025": {
-  "baixado_em": "2026-11-16T11:03:26-03:00",
+  "baixado_em": "2026-11-23T18:31:57-03:00",
   "colunas_brutas": [
    "TIMESTAMP",
    "RECORD",
@@ -610,7 +610,7 @@
   }
  },
  "2026": {
-  "baixado_em": "2026-11-16T11:03:38-03:00",
+  "baixado_em": "2026-11-23T18:32:02-03:00",
   "colunas_brutas": [
    "TIMESTAMP",
    "RECORD",
@@ -645,7 +645,7 @@
    "vento_dir_graus": "",
    "vento_ms": "m/s"
   },
-  "fim": "2026-11-16T07:00:00",
+  "fim": "2026-11-23T07:00:00",
   "inicio": "2026-01-01T00:00:00",
   "intervalo_s": 900.0,
   "mapeamento": {
@@ -657,7 +657,7 @@
    "vento_dir_graus": "Dvento_D1_WVT",
    "vento_ms": "Vvento_ms_AVG"
   },
-  "registros": 30555,
+  "registros": 31227,
   "unidades": {
    "Albedo_Avg": "W/m^2",
    "BattV_Avg": "Volts",
