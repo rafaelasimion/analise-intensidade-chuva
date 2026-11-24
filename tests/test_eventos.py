@@ -62,3 +62,32 @@ def test_maximas_anuais():
 def test_registro_da_meia_noite_pertence_ao_dia_anterior():
     df = _serie({"2025-01-02 00:00": 3.0})
     assert df.loc[df["data_hora"] == pd.Timestamp("2025-01-02 00:00"), "dia"].iloc[0] == pd.Timestamp("2025-01-01")
+
+
+def test_serie_que_muda_de_resolucao():
+    """Ano horário seguido de ano de 15 min: cada trecho usa o seu intervalo."""
+    from hidro.esalq import adicionar_derivados
+
+    h = pd.DataFrame({"data_hora": pd.date_range("2015-01-01 01:00", "2016-01-01 00:00", freq="1h")})
+    h["chuva_mm"] = 0.0
+    h.loc[h["data_hora"] == "2015-03-01 15:00", "chuva_mm"] = 20.0
+    q = pd.DataFrame({"data_hora": pd.date_range("2016-01-01 00:15", "2017-01-01 00:00", freq="15min")})
+    q["chuva_mm"] = 0.0
+    q.loc[q["data_hora"] == "2016-03-01 15:00", "chuva_mm"] = 10.0
+    df = adicionar_derivados(pd.concat([h, q], ignore_index=True))
+
+    # intensidade com o intervalo de cada dia: 20 mm/h e 40 mm/h
+    assert df.loc[df["data_hora"] == "2015-03-01 15:00", "intensidade_mm_h"].iloc[0] == pytest.approx(20)
+    assert df.loc[df["data_hora"] == "2016-03-01 15:00", "intensidade_mm_h"].iloc[0] == pytest.approx(40)
+
+    tab = eventos_chuva(df)
+    assert len(tab) == 2
+    assert np.isnan(tab["i15_mm_h"].iloc[0]) and tab["i60_mm_h"].iloc[0] == pytest.approx(20)
+    assert tab["i15_mm_h"].iloc[1] == pytest.approx(40)
+
+    m = maximas_anuais(df)
+    a2015, a2016 = m["anos"]
+    assert a2015["intervalo_min"] == 60 and a2016["intervalo_min"] == 15
+    v15 = {v["duracao_min"]: v["chuva_mm"] for v in a2015["valores"]}
+    assert v15[15] is None and v15[60] == pytest.approx(20)
+    assert {v["duracao_min"]: v["chuva_mm"] for v in a2016["valores"]}[15] == pytest.approx(10)

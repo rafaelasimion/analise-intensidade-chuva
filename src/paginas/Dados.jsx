@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useApi } from '../api.js';
 import { colunasDe } from '../colunas.js';
-import { Aviso, BarraPeriodo, CabecalhoPagina, Carregando, Tabela } from '../componentes/Comuns.jsx';
+import { Aviso, BarraPeriodo, Carregando, IntroAba, Tabela } from '../componentes/Comuns.jsx';
 import Downloads from '../componentes/Downloads.jsx';
 import { num } from '../formato.js';
-import { useMeta } from '../meta.jsx';
+import { textosResolucao, useMeta } from '../meta.jsx';
 import { usePeriodo } from '../periodo.js';
 
 const POR_PAGINA = 100;
@@ -15,7 +15,11 @@ function dias({ inicio, fim }) {
 
 export default function Dados() {
   const { periodo, escolherPreset, escolherIntervalo, presets } = usePeriodo('7d');
-  const { versao } = useMeta();
+  const { versao, api, posto } = useMeta();
+  const textos = textosResolucao(posto?.resolucao_min);
+  const semRegistros = posto && !posto.tem_registros;
+  // limite para o .xlsx (~300 mil linhas): 8 anos de 15 min ou 30 de dados horários
+  const limiteXlsx = posto?.resolucao_min === 60 ? 12000 : 3000;
   const [soChuva, setSoChuva] = useState(false);
   const [ordem, setOrdem] = useState('desc');
   const [pagina, setPagina] = useState(1);
@@ -25,19 +29,19 @@ export default function Dados() {
   const params = periodo
     ? { inicio: periodo.inicio, fim: periodo.fim, pagina, por_pagina: POR_PAGINA, so_chuva: soChuva, ordem, v: versao }
     : null;
-  const { dados, erro, carregando } = useApi('/api/esalq/dados', params, Boolean(periodo));
+  const { dados, erro, carregando } = useApi(`${api}/dados`, params, Boolean(periodo) && !semRegistros);
 
   return (
     <div className="pagina">
-      <CabecalhoPagina titulo="Dados de 15 minutos">
-        Cada linha é um intervalo de 15 minutos que termina no horário indicado. A intensidade é a chuva do intervalo
-        dividida pela duração, em mm/h.
-      </CabecalhoPagina>
+      <IntroAba titulo={textos.tituloDados}>
+        Cada linha é um intervalo de {textos.intervalo} que termina no horário indicado (hora de Brasília). A intensidade
+        é a chuva do intervalo dividida pela duração, em mm/h.
+      </IntroAba>
 
       <BarraPeriodo periodo={periodo} presets={presets} escolherPreset={escolherPreset} escolherIntervalo={escolherIntervalo}>
         <label className="check">
           <input type="checkbox" checked={soChuva} onChange={(e) => setSoChuva(e.target.checked)} />
-          Só intervalos com chuva
+          Só registros com chuva
         </label>
         <label className="campo campo--linha">
           <span className="campo__rotulo">Ordem</span>
@@ -48,16 +52,23 @@ export default function Dados() {
         </label>
       </BarraPeriodo>
 
-      {periodo && (
+      {semRegistros && (
+        <Aviso tipo="info" titulo="Ainda sem dados horários deste posto">
+          Os totais diários já estão na aba Relatórios (com download em CSV e .xlsx). Os registros horários entram na
+          próxima atualização automática.
+        </Aviso>
+      )}
+
+      {periodo && !semRegistros && (
         <section className="secao" aria-labelledby="titulo-baixar">
           <h2 id="titulo-baixar" className="secao__titulo">Baixar este período</h2>
           <Downloads
-            caminho="/api/esalq/download"
+            caminho={`${api}/download`}
             params={{ tipo: 'dados', inicio: periodo.inicio, fim: periodo.fim, so_chuva: soChuva }}
-            xlsx={dias(periodo) <= 3000}
+            xlsx={dias(periodo) <= limiteXlsx}
           />
-          {dias(periodo) > 3000 && (
-            <p className="texto-pequeno">Para mais de 8 anos de dados de 15 min, use o CSV: o Excel não abre tantas linhas.</p>
+          {dias(periodo) > limiteXlsx && (
+            <p className="texto-pequeno">Para um período tão longo, use o CSV: o Excel não abre tantas linhas.</p>
           )}
         </section>
       )}
@@ -67,7 +78,7 @@ export default function Dados() {
           {erro.message}
         </Aviso>
       )}
-      {!dados && !erro && <Carregando />}
+      {!dados && !erro && !semRegistros && <Carregando />}
 
       {dados && (
         <section className={`secao${carregando ? ' esmaecido' : ''}`} aria-labelledby="titulo-registros">
@@ -81,7 +92,7 @@ export default function Dados() {
           ) : (
             <>
               <Tabela
-                legenda="Registros de 15 minutos"
+                legenda={textos.tituloDados}
                 colunas={colunasDe(dados.colunas, { chuva_mm: { casas: 2 }, intensidade_mm_h: { casas: 2 }, chuva_acum_dia_mm: { casas: 2 } })}
                 linhas={dados.linhas}
               />

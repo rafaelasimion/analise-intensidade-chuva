@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from 'react';
-import { dataBR, dataHoraBR, duracao, num } from '../formato.js';
+import { dataBR, dataHoraBR, duracao, num, paraData } from '../formato.js';
 import { useMeta } from '../meta.jsx';
 
 /* ------------------------------------------------------------------ */
@@ -295,19 +295,29 @@ export function BarraPeriodo({ periodo, presets, escolherPreset, escolherInterva
 
 function SituacaoDados({ meta, atualizar, atualizando }) {
   if (!meta) return null;
-  const atual = meta.ano_atual ?? {};
   const fim = meta.limites?.fim;
+  if (meta.posto?.fonte !== 'esalq') {
+    return (
+      <p className="situacao">
+        <span>
+          Dados até <strong>{dataBR(new Date(paraData(fim).getTime() - 1000))}</strong>. O INMET publica os dados das
+          estações uma vez por mês; o site confere toda semana se há pacote novo.
+        </span>
+      </p>
+    );
+  }
+  const atual = meta.ano_atual ?? {};
   const aoVivo = atual.origem === 'ao_vivo';
   return (
     <p className="situacao">
       <span>
         Dados até <strong>{dataHoraBR(fim)}</strong>
         {aoVivo
-          ? `, baixados do site da ESALQ às ${dataHoraBR(atual.atualizado_em).slice(11)}.`
+          ? `, o último registro publicado pela ESALQ (site conferido às ${dataHoraBR(atual.atualizado_em).slice(11)}).`
           : '. O site da ESALQ não respondeu agora; mostrando a última cópia salva.'}
       </span>
       <button type="button" className="botao botao--texto" onClick={atualizar} disabled={atualizando}>
-        {atualizando ? 'Buscando…' : 'Buscar dados novos'}
+        {atualizando ? 'Verificando…' : 'Verificar se há dados novos'}
       </button>
     </p>
   );
@@ -323,6 +333,16 @@ export function CabecalhoPagina({ titulo, children }) {
       <h1 className="pagina__titulo">{titulo}</h1>
       {children && <p className="pagina__lead">{children}</p>}
     </header>
+  );
+}
+
+/** Abertura de uma aba da página do posto (o h1 é o nome do posto). */
+export function IntroAba({ titulo, children }) {
+  return (
+    <div className="aba-intro">
+      <h2 className="visualmente-oculto">{titulo}</h2>
+      {children && <p className="aba-intro__texto">{children}</p>}
+    </div>
   );
 }
 

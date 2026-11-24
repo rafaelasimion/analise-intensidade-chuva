@@ -9,19 +9,43 @@ DURACOES_MAXIMAS_MIN = [15, 30, 60, 120, 180, 360, 720, 1440]
 
 
 def _passo(df15: pd.DataFrame) -> pd.Timedelta:
-    dif = df15["data_hora"].diff().dropna()
-    dif = dif[(dif > pd.Timedelta(0)) & (dif <= pd.Timedelta(minutes=30))]
+    """Intervalo de registro mais comum (15 min na ESALQ, 1 h no INMET)."""
+    dif = df15["data_hora"].sort_values().diff().dropna()
+    dif = dif[(dif > pd.Timedelta(0)) & (dif <= pd.Timedelta(hours=3))]
     if dif.empty:
         return pd.Timedelta(minutes=15)
     return dif.mode().iloc[0]
 
 
-def grade_chuva(df15: pd.DataFrame) -> tuple[pd.Series, pd.Timedelta]:
+def grade_chuva(df15: pd.DataFrame, passo: pd.Timedelta | None = None) -> tuple[pd.Series, pd.Timedelta]:
     """Chuva em grade regular (rótulo = fim do intervalo). Falhas ficam NaN."""
-    passo = _passo(df15)
+    passo = passo or _passo(df15)
     s = df15.set_index("data_hora")["chuva_mm"].sort_index()
-    s = s.resample(passo, label="right", closed="right").sum(min_count=1)
+    s = s.resample(passo, label="right", closed="right", origin="epoch").sum(min_count=1)
     return s, passo
+
+
+def segmentos_por_passo(df15: pd.DataFrame) -> list[tuple[pd.DataFrame, pd.Timedelta]]:
+    """Divide a série em trechos de anos seguidos com o mesmo intervalo de registro.
+
+    Uma série que muda de resolução (p.ex. horária nos anos antigos e 15 min
+    depois) não pode ir para uma grade só: a chuva de 1 h cairia num intervalo
+    de 15 min e a intensidade sairia 4 vezes maior.
+    """
+    if df15.empty:
+        return []
+    ano = (df15["data_hora"] - pd.Timedelta(seconds=1)).dt.year
+    passos = {int(a): _passo(parte) for a, parte in df15.groupby(ano)}
+    segmentos, atual, inicio = [], None, None
+    for a in sorted(passos):
+        if passos[a] != atual:
+            if atual is not None:
+                segmentos.append((inicio, a - 1, atual))
+            atual, inicio = passos[a], a
+    segmentos.append((inicio, max(passos), atual))
+    if len(segmentos) == 1:
+        return [(df15, atual)]
+    return [(df15[(ano >= a0) & (ano <= a1)], p) for a0, a1, p in segmentos]
 
 
 def _somas_moveis(v: np.ndarray, k: int) -> np.ndarray:
@@ -45,7 +69,21 @@ def eventos_chuva(df15: pd.DataFrame, intervalo_seco_h: float = 6.0, chuva_min_m
     if df15.empty or df15["chuva_mm"].fillna(0).sum() <= 0:
         return pd.DataFrame(columns=colunas)
 
-    s, passo = grade_chuva(df15)
+    partes = [_eventos_trecho(t, p, intervalo_seco_h, chuva_min_mm) for t, p in segmentos_por_passo(df15)]
+    partes = [p for p in partes if not p.empty]
+    if not partes:
+        return pd.DataFrame(columns=colunas)
+    tab = pd.concat(partes, ignore_index=True) if len(partes) > 1 else partes[0]
+    tab.insert(0, "evento", np.arange(1, len(tab) + 1))
+    return tab[colunas]
+
+
+def _eventos_trecho(df15: pd.DataFrame, passo: pd.Timedelta, intervalo_seco_h: float, chuva_min_mm: float) -> pd.DataFrame:
+    colunas = [
+        "inicio", "fim", "duracao_min", "chuva_mm", "intensidade_media_mm_h",
+        "i15_mm_h", "i30_mm_h", "i60_mm_h", "momento_pico", "registros_falhos",
+    ]
+    s, passo = grade_chuva(df15, passo)
     passo_h = passo.total_seconds() / 3600
     falhas = s.isna().to_numpy()
     v = s.fillna(0).to_numpy(dtype=float)
@@ -54,6 +92,7 @@ def eventos_chuva(df15: pd.DataFrame, intervalo_seco_h: float = 6.0, chuva_min_m
     chuvosos = np.flatnonzero(v > 0)
     if chuvosos.size == 0:
         return pd.DataFrame(columns=colunas)
+    passo_min = passo.total_seconds() / 60
 
     # Período seco entre o fim de um intervalo chuvoso e o início do próximo
     seco_h = (np.diff(chuvosos) - 1) * passo_h
@@ -61,7 +100,9 @@ def eventos_chuva(df15: pd.DataFrame, intervalo_seco_h: float = 6.0, chuva_min_m
     inicios = np.concatenate([[chuvosos[0]], chuvosos[quebra + 1]])
     fins = np.concatenate([chuvosos[quebra], [chuvosos[-1]]])
 
-    k = {m: max(1, int(round(m / 60 / passo_h))) for m in (15, 30, 60)}
+    # Só as durações que são múltiplas do intervalo (numa estação horária não há I15 nem I30)
+    k = {m: int(round(m / passo_min)) for m in (15, 30, 60)
+         if m >= passo_min - 1e-9 and abs(m / passo_min - round(m / passo_min)) < 1e-6}
     moveis = {m: _somas_moveis(v, kk) for m, kk in k.items()}
     n = len(v)
 
@@ -85,16 +126,14 @@ def eventos_chuva(df15: pd.DataFrame, intervalo_seco_h: float = 6.0, chuva_min_m
             "duracao_min": round(duracao_h * 60),
             "chuva_mm": round(total, 3),
             "intensidade_media_mm_h": round(total / duracao_h, 3) if duracao_h > 0 else None,
-            "i15_mm_h": round(intens[15], 3),
-            "i30_mm_h": round(intens[30], 3),
-            "i60_mm_h": round(intens[60], 3),
+            "i15_mm_h": round(intens[15], 3) if 15 in intens else np.nan,
+            "i30_mm_h": round(intens[30], 3) if 30 in intens else np.nan,
+            "i60_mm_h": round(intens[60], 3) if 60 in intens else np.nan,
             "momento_pico": pico,
             "registros_falhos": int(falhas[i0:i1 + 1].sum()),
         })
 
-    tab = pd.DataFrame(linhas, columns=[c for c in colunas if c != "evento"])
-    tab.insert(0, "evento", np.arange(1, len(tab) + 1))
-    return tab
+    return pd.DataFrame(linhas, columns=colunas)
 
 
 def intensidade_simples(chuva_mm: float, duracao_min: float) -> float:
@@ -107,58 +146,72 @@ def intensidade_simples(chuva_mm: float, duracao_min: float) -> float:
 def maximas_anuais(df15: pd.DataFrame, duracoes_min: list[int] | None = None) -> dict:
     """Máxima chuva (e intensidade) de cada ano para várias durações (janelas móveis).
 
-    É a série de entrada usual para ajuste de curvas IDF.
+    É a série de entrada usual para ajuste de curvas IDF. Cada ano usa o seu
+    intervalo de registro; durações menores que ele ficam vazias (None).
     """
     duracoes_min = duracoes_min or DURACOES_MAXIMAS_MIN
     if df15.empty:
-        return {"duracoes_min": duracoes_min, "anos": [], "estatisticas": []}
-
-    s, passo = grade_chuva(df15)
-    passo_min = passo.total_seconds() / 60
-    duracoes = [d for d in duracoes_min if d >= passo_min and abs(d / passo_min - round(d / passo_min)) < 1e-6]
-    falhas = s.isna()
-    v = s.fillna(0)
-
-    # Dia civil (o registro das 00:00 pertence ao dia anterior)
-    dias = (s.index - pd.Timedelta(seconds=1)).normalize()
-    diario = v.groupby(dias).sum().where(s.groupby(dias).count() > 0)
+        return {"duracoes_min": [], "anos": [], "estatisticas": []}
 
     anos = []
-    for ano in sorted(set((s.index - pd.Timedelta(seconds=1)).year)):
-        mascara = (s.index - pd.Timedelta(seconds=1)).year == ano
-        va = v[mascara]
-        if va.empty:
-            continue
-        esperado = ((pd.Timestamp(f"{ano + 1}-01-01") - pd.Timestamp(f"{ano}-01-01")) / passo)
-        cobertura = float((~falhas[mascara]).sum() / esperado * 100)
-        valores = []
-        arr = va.to_numpy(dtype=float)
-        for d in duracoes:
-            kk = int(round(d / passo_min))
-            somas = _somas_moveis(arr, kk)
-            j = int(np.argmax(somas))
-            total = float(somas[j])
-            valores.append({
-                "duracao_min": d,
-                "chuva_mm": round(total, 2),
-                "intensidade_mm_h": round(total / (d / 60), 2),
-                "quando": va.index[j].isoformat() if total > 0 else None,
+    usadas: set[int] = set()
+    for trecho, passo in segmentos_por_passo(df15):
+        s, passo = grade_chuva(trecho, passo)
+        passo_min = passo.total_seconds() / 60
+        validas = {d for d in duracoes_min
+                   if d >= passo_min - 1e-9 and abs(d / passo_min - round(d / passo_min)) < 1e-6}
+        usadas |= validas
+        falhas = s.isna()
+        v = s.fillna(0)
+        dias = (s.index - pd.Timedelta(seconds=1)).normalize()
+        diario = v.groupby(dias).sum().where(s.groupby(dias).count() > 0)
+        ano_de = (s.index - pd.Timedelta(seconds=1)).year
+
+        for ano in sorted(set(ano_de)):
+            mascara = ano_de == ano
+            va = v[mascara]
+            if va.empty:
+                continue
+            esperado = (pd.Timestamp(f"{ano + 1}-01-01") - pd.Timestamp(f"{ano}-01-01")) / passo
+            cobertura = float((~falhas[mascara]).sum() / esperado * 100)
+            arr = va.to_numpy(dtype=float)
+            valores = []
+            for d in duracoes_min:
+                if d not in validas:
+                    valores.append({"duracao_min": d, "chuva_mm": None, "intensidade_mm_h": None, "quando": None})
+                    continue
+                kk = int(round(d / passo_min))
+                somas = _somas_moveis(arr, kk)
+                j = int(np.argmax(somas))
+                total = float(somas[j])
+                valores.append({
+                    "duracao_min": d,
+                    "chuva_mm": round(total, 2),
+                    "intensidade_mm_h": round(total / (d / 60), 2),
+                    "quando": va.index[j].isoformat() if total > 0 else None,
+                })
+            da = diario[diario.index.year == ano].dropna()
+            anos.append({
+                "ano": int(ano),
+                "intervalo_min": int(round(passo_min)),
+                "cobertura_pct": round(min(cobertura, 100.0), 1),
+                "chuva_total_mm": round(float(va.sum()), 1),
+                "chuva_max_dia_mm": round(float(da.max()), 2) if not da.empty else None,
+                "data_chuva_max_dia": da.idxmax().date().isoformat() if not da.empty else None,
+                "valores": valores,
             })
-        da = diario[diario.index.year == ano].dropna()
-        anos.append({
-            "ano": int(ano),
-            "cobertura_pct": round(min(cobertura, 100.0), 1),
-            "chuva_total_mm": round(float(va.sum()), 1),
-            "chuva_max_dia_mm": round(float(da.max()), 2) if not da.empty else None,
-            "data_chuva_max_dia": da.idxmax().date().isoformat() if not da.empty else None,
-            "valores": valores,
-        })
+
+    # Só as durações calculáveis em algum ano
+    duracoes = [d for d in duracoes_min if d in usadas]
+    for a in anos:
+        a["valores"] = [v for v in a["valores"] if v["duracao_min"] in usadas]
 
     # Estatísticas das máximas (só anos com ≥ 80% de dados)
     completos = [a for a in anos if a["cobertura_pct"] >= 80]
     estat = []
     for i, d in enumerate(duracoes):
-        xs = np.array([a["valores"][i]["intensidade_mm_h"] for a in completos], dtype=float)
+        xs = np.array([a["valores"][i]["intensidade_mm_h"] for a in completos
+                       if a["valores"][i]["intensidade_mm_h"] is not None], dtype=float)
         estat.append({
             "duracao_min": d,
             "n_anos": int(len(xs)),
@@ -175,6 +228,7 @@ def maximas_para_tabela(maximas: dict) -> pd.DataFrame:
     for a in maximas["anos"]:
         linha = {
             "ano": a["ano"],
+            "intervalo_min": a.get("intervalo_min"),
             "cobertura_pct": a["cobertura_pct"],
             "chuva_total_mm": a["chuva_total_mm"],
             "chuva_max_dia_mm": a["chuva_max_dia_mm"],

@@ -12,6 +12,7 @@ DIR_DADOS = RAIZ / "dados"
 DIR_ESALQ = DIR_DADOS / "esalq"
 DIR_INMET = DIR_DADOS / "inmet"
 DIR_INMET_DIARIO = DIR_INMET / "diario"
+DIR_INMET_HORARIO = DIR_INMET / "horario"
 
 # Na Vercel só /tmp é gravável
 DIR_TMP = Path(os.environ.get("HIDRO_TMP", "/tmp/hidro"))
@@ -55,6 +56,10 @@ TTL_ANO_ATUAL = int(os.environ.get("ESALQ_TTL", "3600"))
 # ---------------------------------------------------------------------------
 URL_INMET_ANUAL = "https://portal.inmet.gov.br/uploads/dadoshistoricos/{ano}.zip"
 ANO_INICIAL_INMET = 2000
+
+# Retângulo que contém o estado de SP (com folga), para descartar estações de fora
+# que aparecem no catálogo (p.ex. a estação C891, na Antártida, publicada como "SP")
+LIMITES_SP = {"lat": (-25.6, -19.5), "lon": (-53.5, -43.8)}
 
 # ---------------------------------------------------------------------------
 # NASA POWER (estimativas por satélite/reanálise, usadas só quando escolhidas)

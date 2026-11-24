@@ -4,6 +4,7 @@
     python scripts/atualizar_dados.py esalq --desde 1997 --forcar
     python scripts/atualizar_dados.py inmet            # pacotes anuais do INMET (estações de SP)
     python scripts/atualizar_dados.py inmet --anos 2024 2025
+    python scripts/atualizar_dados.py inmet --forcar   # reprocessa todos os pacotes
     python scripts/atualizar_dados.py tudo
 
 Roda toda semana no GitHub Actions (.github/workflows/atualizar-dados.yml),
@@ -28,8 +29,8 @@ sys.path.insert(0, str(RAIZ))
 
 from hidro import inmet  # noqa: E402
 from hidro.config import (  # noqa: E402
-    ANO_INICIAL_BUSCA_ESALQ, ANO_INICIAL_INMET, COLUNAS_15MIN, DIR_DADOS, DIR_ESALQ, DIR_INMET_DIARIO,
-    FUSO_BR, URL_INMET_ANUAL, URLS_ESALQ,
+    ANO_INICIAL_BUSCA_ESALQ, ANO_INICIAL_INMET, COLUNAS_15MIN, DIR_DADOS, DIR_ESALQ, DIR_INMET, DIR_INMET_DIARIO,
+    DIR_INMET_HORARIO, FUSO_BR, URL_INMET_ANUAL, URLS_ESALQ,
 )
 from hidro.esalq import ler_arquivo_esalq  # noqa: E402
 
@@ -81,13 +82,27 @@ def baixar(url: str, tentativas: int = 3, timeout: int = 90, destino: Path | Non
 # ---------------------------------------------------------------------------
 
 
-def _ano_completo(caminho: Path) -> bool:
-    """True se o arquivo já tem as variáveis além da chuva."""
-    if not caminho.exists():
-        return False
-    df = pd.read_csv(caminho, nrows=3000)
-    extras = [c for c in COLUNAS_15MIN[2:] if c in df]
-    return bool(extras) and df[extras].notna().any().any()
+def _ja_baixado(colunas: dict, ano: int) -> bool:
+    """True se o arquivo daquele ano já foi lido depois de o ano terminar.
+
+    Não basta olhar o .csv.gz: o arquivo de um ano costuma trazer as primeiras
+    horas do ano seguinte, e isso criaria um arquivo "parcial" do ano seguinte.
+    """
+    info = colunas.get(str(ano)) or {}
+    baixado = str(info.get("baixado_em", ""))[:4]
+    return baixado.isdigit() and int(baixado) > ano
+
+
+def conferir_leitura(df: pd.DataFrame, info: dict, ano: int) -> None:
+    """Recusa arquivos lidos de forma suspeita (melhor não gravar do que gravar errado)."""
+    if "chuva_mm" not in info.get("mapeamento", {}):
+        raise ValueError(f"coluna de chuva não identificada (colunas: {', '.join(info.get('colunas_brutas', []))})")
+    dia = (df["data_hora"] - pd.Timedelta(seconds=1)).dt.year
+    no_ano = float((dia == ano).mean()) if len(df) else 0.0
+    if no_ano < 0.5:
+        anos = dia.value_counts().head(3).to_dict()
+        raise ValueError(f"só {no_ano:.0%} dos registros caem em {ano} (anos encontrados: {anos}); "
+                         "a data/hora provavelmente foi montada errado")
 
 
 def _gravar_ano_esalq(ano: int, novo: pd.DataFrame, prioridade_novo: bool) -> int:
@@ -120,7 +135,7 @@ def atualizar_esalq(anos: list[int] | None, desde: int, forcar: bool) -> None:
     for ano in anos:
         caminho = DIR_ESALQ / f"esalq_{ano}.csv.gz"
         recente = ano >= hoje.year - 1
-        if not forcar and not recente and _ano_completo(caminho):
+        if not forcar and not recente and caminho.exists() and _ja_baixado(colunas, ano):
             print(f"ESALQ {ano}: já completo")
             disponiveis.add(ano)
             continue
@@ -147,7 +162,8 @@ def atualizar_esalq(anos: list[int] | None, desde: int, forcar: bool) -> None:
                 print(f"  ERRO: {'; '.join(erros) or 'arquivo não encontrado'}")
             continue
         try:
-            df, info = ler_arquivo_esalq(conteudo)
+            df, info = ler_arquivo_esalq(conteudo, ano_arquivo=ano)
+            conferir_leitura(df, info, ano)
         except Exception as exc:  # noqa: BLE001
             print(f"  ERRO ao ler o arquivo: {exc}")
             if len(conteudo) < 2048:  # página de erro em vez de planilha
@@ -163,6 +179,7 @@ def atualizar_esalq(anos: list[int] | None, desde: int, forcar: bool) -> None:
         colunas[str(ano)] = info
         inexistentes.discard(ano)
         print(f"  variáveis encontradas: {', '.join(info['mapeamento']) or 'nenhuma'}")
+        print(f"  intervalo dos registros: {info['intervalo_s'] / 60:g} min; de {info['inicio']} a {info['fim']}")
 
     gravar_json(DIR_ESALQ / "colunas.json", colunas)
     gravar_json(DIR_ESALQ / "anos.json", {
@@ -176,19 +193,49 @@ def atualizar_esalq(anos: list[int] | None, desde: int, forcar: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+ARQ_PACOTES_INMET = DIR_INMET / "pacotes.json"
+
+
+def _versao_remota(url: str) -> dict | None:
+    """Tamanho e data do pacote no servidor (para não baixar de novo o que não mudou)."""
+    try:
+        r = requests.head(url, headers=CABECALHO, timeout=30, allow_redirects=True)
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    versao = {k: r.headers.get(h) for k, h in (("tamanho", "Content-Length"), ("modificado", "Last-Modified"))}
+    return versao if any(versao.values()) else None
+
+
 def atualizar_inmet(anos: list[int] | None, forcar: bool) -> None:
+    """Baixa os pacotes anuais do INMET e guarda, para cada estação de SP:
+
+    - os dados horários: dados/inmet/horario/<CODIGO>/<ANO>.csv.gz
+    - os dados diários de todas as estações: dados/inmet/diario/inmet_sp_<ANO>.csv.gz
+
+    Pacotes já processados só são baixados de novo se mudarem no servidor
+    (o do ano corrente muda todo mês).
+    """
     DIR_INMET_DIARIO.mkdir(parents=True, exist_ok=True)
+    DIR_INMET_HORARIO.mkdir(parents=True, exist_ok=True)
     hoje = datetime.now(FUSO_BR).date()
     anos = anos or list(range(ANO_INICIAL_INMET, hoje.year + 1))
     catalogo = {e["codigo"]: e for e in inmet.estacoes()}
+    pacotes = ler_json(ARQ_PACOTES_INMET, {})
+    anos_alterados: set[int] = set()
 
     for ano in anos:
-        destino = DIR_INMET_DIARIO / f"inmet_sp_{ano}.csv.gz"
-        recente = ano >= hoje.year - (1 if hoje.month <= 2 else 0)
-        if destino.exists() and not forcar and not recente:
-            print(f"INMET {ano}: já existe")
-            continue
         url = URL_INMET_ANUAL.format(ano=ano)
+        anterior = pacotes.get(str(ano))
+        if anterior and not forcar:
+            if ano < hoje.year - 1:
+                print(f"INMET {ano}: já processado")
+                continue
+            remota = _versao_remota(url)
+            if remota and remota == anterior.get("versao"):
+                print(f"INMET {ano}: sem novidades no servidor")
+                continue
         print(f"INMET {ano}: baixando {url}")
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / f"{ano}.zip"
@@ -200,23 +247,31 @@ def atualizar_inmet(anos: list[int] | None, forcar: bool) -> None:
             if ok is None:
                 print("  pacote não encontrado (404)")
                 continue
+            n_estacoes = 0
             try:
-                diario, metas = inmet.processar_zip(zip_path, "SP")
+                for meta, horario in inmet.estacoes_do_zip(zip_path, "SP"):
+                    alterados = inmet.gravar_horario(meta["codigo"], horario)
+                    if not alterados:
+                        continue
+                    anos_alterados |= alterados
+                    n_estacoes += 1
+                    atual = catalogo.get(meta["codigo"], {})
+                    atual.update({k: meta[k] for k in ("codigo", "nome", "lat", "lon", "alt") if k in meta})
+                    if meta.get("fundacao"):
+                        atual["fundacao"] = meta["fundacao"]
+                    atual["uf"] = "SP"
+                    catalogo[meta["codigo"]] = atual
             except Exception as exc:  # noqa: BLE001
                 print(f"  ERRO ao processar: {exc}")
                 continue
-        if diario.empty:
-            print("  nenhuma estação de SP no pacote")
-            continue
-        diario.to_csv(destino, index=False, float_format="%.4g", date_format="%Y-%m-%d", compression=GZIP)
-        print(f"  {diario['codigo'].nunique()} estações, {len(diario)} dias")
-        for m in metas:
-            atual = catalogo.get(m["codigo"], {})
-            atual.update({k: m[k] for k in ("codigo", "nome", "lat", "lon", "alt") if k in m})
-            if m.get("fundacao"):
-                atual["fundacao"] = m["fundacao"]
-            atual["uf"] = "SP"
-            catalogo[m["codigo"]] = atual
+        print(f"  {n_estacoes} estações de SP")
+        pacotes[str(ano)] = {"processado_em": agora(), "estacoes": n_estacoes, "versao": _versao_remota(url)}
+        gravar_json(ARQ_PACOTES_INMET, pacotes)
+
+    # Diário refeito a partir do horário (assim 31/dez recebe as horas que vêm no pacote seguinte)
+    for ano in sorted(anos_alterados):
+        diario = inmet.reconstruir_diario_ano(ano)
+        print(f"INMET diário {ano}: {diario['codigo'].nunique() if len(diario) else 0} estações, {len(diario)} dias")
 
     # Período com dados de cada estação
     faixas: dict[str, list] = {}
@@ -232,7 +287,7 @@ def atualizar_inmet(anos: list[int] | None, forcar: bool) -> None:
             catalogo[cod]["inicio_dados"], catalogo[cod]["fim_dados"] = ini, fim
 
     inmet.salvar_estacoes(
-        list(catalogo.values()),
+        [e for e in catalogo.values() if inmet.dentro_de_sp(e.get("lat"), e.get("lon"))],
         "Pacotes históricos do INMET (portal.inmet.gov.br/dadoshistoricos), atualizado em " + agora(),
     )
     marcar_atualizacao("inmet")

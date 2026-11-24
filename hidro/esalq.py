@@ -17,6 +17,8 @@ import csv
 import io
 import re
 import unicodedata
+from datetime import datetime
+from datetime import time as dt_time
 from typing import Any
 
 import numpy as np
@@ -98,20 +100,65 @@ def _ler_tabela_bruta(conteudo: bytes) -> pd.DataFrame:
     raise ValueError("Formato de arquivo não reconhecido (" + "; ".join(erros) + ")")
 
 
+# Nomes das colunas de tempo nos formatos antigos (Campbell CR10/CR10X e planilhas do LEB)
+_NOMES_TEMPO = {
+    "timestamp": ("timestamp", "data_hora", "datahora", "date_time", "datetime"),
+    "data": ("data", "date"),
+    "ano": ("ano", "year", "yr", "aaaa"),
+    "mes": ("mes", "month", "mon"),
+    "dia": ("dia", "day", "dj", "julian", "doy", "dia_jul", "diajul", "dia_juliano", "dia_do_ano",
+            "jday", "julian_day", "dia_j", "d_jul", "djul"),
+    "hora": ("hora", "time", "hhmm", "hour", "hr_min", "horario", "hora_min", "hm", "hrmin", "hora_local",
+             "hh_mm", "hora_minuto", "horas"),
+}
+
+
+def _papel_tempo(nome: Any) -> str | None:
+    """'timestamp', 'data', 'ano', 'mes', 'dia' ou 'hora' para colunas de tempo."""
+    n = _norm(nome)
+    if not n:
+        return None
+    if n.startswith("timestamp"):
+        return "timestamp"
+    for papel, nomes in _NOMES_TEMPO.items():
+        if n in nomes:
+            return papel
+    if n.startswith(("dia_jul", "diajul", "julian")):
+        return "dia"
+    return None
+
+
 def _achar_linha_cabecalho(bruto: pd.DataFrame) -> int | None:
-    limite = min(len(bruto), 25)
+    limite = min(len(bruto), 80)
     for i in range(limite):
         valores = [_norm(v) for v in bruto.iloc[i].tolist()]
-        if "timestamp" in valores or any(v.startswith("timestamp") for v in valores):
+        if any(v.startswith("timestamp") for v in valores):
             return i
-    # Formatos antigos: colunas separadas de data e hora, ou ano + dia juliano + hora
+    # Formatos antigos: data + hora, ou (ano +) dia juliano + hora. A linha de
+    # legenda ("Dia Jul = Dia juliano") não conta porque o texto não é só o nome.
     for i in range(limite):
-        tokens = {_norm(v) for v in bruto.iloc[i].tolist()}
-        tem_data = any(t in tokens for t in ("data", "date", "dia", "day", "dj", "julian"))
-        tem_hora = any(t in tokens for t in ("hora", "time", "hhmm", "hour", "hr_min"))
-        if tem_data and tem_hora:
+        celulas = [v for v in bruto.iloc[i].tolist() if pd.notna(v) and str(v).strip()]
+        papeis = {_papel_tempo(v) for v in celulas}
+        if len(celulas) >= 3 and "hora" in papeis and papeis & {"data", "dia"}:
             return i
     return None
+
+
+def _legenda(bruto: pd.DataFrame, ate: int) -> dict[str, tuple[str, str]]:
+    """Legenda acima do cabeçalho ("UR = Umidade Relativa (%)") -> {sigla: (descrição, unidade)}."""
+    saida: dict[str, tuple[str, str]] = {}
+    for i in range(ate):
+        for v in bruto.iloc[i].tolist():
+            if not isinstance(v, str) or "=" not in v:
+                continue
+            for parte in re.split(r"[;\n]", v):
+                m = re.match(r"\s*([^=]{1,25}?)\s*=\s*(.+?)\s*$", parte)
+                if not m:
+                    continue
+                desc = m.group(2)
+                unidades = re.findall(r"\(([^()]*)\)", desc)
+                saida[_norm(m.group(1))] = (desc, unidades[-1] if unidades else "")
+    return saida
 
 
 def _nomes_unicos(nomes: list[Any]) -> list[str]:
@@ -152,37 +199,70 @@ def _para_datetime(serie: pd.Series) -> pd.Series:
     return dt
 
 
-def _timestamp_de_colunas(df: pd.DataFrame) -> pd.Series | None:
+def _minutos_do_dia(serie: pd.Series) -> pd.Series:
+    """Hora do registro em minutos desde 00:00.
+
+    Aceita HHMM (Campbell: 15, 1230, 2400), horas inteiras (1–24), fração do
+    dia do Excel (0,5 = 12:00), objetos de hora e texto "HH:MM".
+    """
+    objetos = serie.dropna()
+    if len(objetos) and all(isinstance(v, (dt_time, datetime)) for v in objetos.head(50)):
+        return serie.map(lambda v: v.hour * 60 + v.minute + v.second / 60 if isinstance(v, (dt_time, datetime)) else np.nan)
+
+    num = pd.to_numeric(serie, errors="coerce")
+    if num.notna().mean() > 0.8:
+        validos = num.dropna()
+        if validos.max() <= 1.0001 and (validos % 1 != 0).any():
+            return (num * 1440).round(3)
+        if validos.max() <= 24 and (validos % 1 == 0).all():
+            return num * 60
+        return (num // 100) * 60 + num % 100
+
+    texto = serie.astype(str).str.strip()
+    partes = texto.str.extract(r"^(\d{1,2})[:h](\d{2})(?::(\d{2}))?")
+    h = pd.to_numeric(partes[0], errors="coerce")
+    m = pd.to_numeric(partes[1], errors="coerce")
+    s = pd.to_numeric(partes[2], errors="coerce").fillna(0)
+    return h * 60 + m + s / 60
+
+
+def _timestamp_de_colunas(df: pd.DataFrame, ano_arquivo: int | None = None) -> pd.Series | None:
     """Monta o timestamp para formatos sem coluna TIMESTAMP."""
-    cols = {_norm(c): c for c in df.columns}
+    cols: dict[str, str] = {}
+    for c in df.columns:
+        papel = _papel_tempo(c)
+        if papel and papel not in cols:
+            cols[papel] = c
 
-    for chave in ("timestamp", "data_hora", "datahora", "date_time", "datetime"):
-        if chave in cols:
-            return _para_datetime(df[cols[chave]])
+    if "timestamp" in cols:
+        return _para_datetime(df[cols["timestamp"]])
+    if "hora" not in cols:
+        return None
+    minutos = pd.to_timedelta(_minutos_do_dia(df[cols["hora"]]), unit="min")
 
-    col_data = next((cols[k] for k in ("data", "date") if k in cols), None)
-    col_hora = next((cols[k] for k in ("hora", "time", "hour", "hhmm", "hr_min") if k in cols), None)
+    if "data" in cols:
+        data = _para_datetime(df[cols["data"]]).dt.normalize()
+        return data + minutos
 
-    if col_data is not None and col_hora is not None:
-        hora = df[col_hora].astype(str).str.strip()
-        so_digitos = hora.str.fullmatch(r"\d{1,4}")
-        hora = hora.where(~so_digitos, hora.str.zfill(4).str[:2] + ":" + hora.str.zfill(4).str[2:])
-        data = _para_datetime(df[col_data]).dt.strftime("%Y-%m-%d")
-        return pd.to_datetime(data + " " + hora, errors="coerce", format="mixed")
+    if "dia" not in cols:
+        return None
+    dia = pd.to_numeric(df[cols["dia"]], errors="coerce")
+    if "ano" in cols:
+        ano = pd.to_numeric(df[cols["ano"]], errors="coerce")
+        ano = ano.where(ano >= 100, ano + np.where(ano < 70, 2000, 1900))  # "05" -> 2005
+    elif ano_arquivo is not None:
+        ano = pd.Series(float(ano_arquivo), index=df.index)
+    else:
+        return None
+    ano_txt = ano.astype("Int64").astype(str)
 
-    col_ano = next((cols[k] for k in ("ano", "year", "yr") if k in cols), None)
-    col_dj = next((cols[k] for k in ("dia", "day", "dj", "julian", "doy", "dia_juliano") if k in cols), None)
-    if col_ano is not None and col_dj is not None and col_hora is not None:
-        ano = pd.to_numeric(df[col_ano], errors="coerce")
-        dj = pd.to_numeric(df[col_dj], errors="coerce")
-        hhmm = pd.to_numeric(df[col_hora], errors="coerce")
-        base = pd.to_datetime(ano.astype("Int64").astype(str) + "-01-01", errors="coerce")
-        return (
-            base
-            + pd.to_timedelta(dj - 1, unit="D")
-            + pd.to_timedelta((hhmm // 100) * 60 + hhmm % 100, unit="min")
-        )
-    return None
+    if "mes" in cols:  # ano + mês + dia do mês
+        mes = pd.to_numeric(df[cols["mes"]], errors="coerce").astype("Int64").astype(str)
+        data = pd.to_datetime(ano_txt + "-" + mes + "-" + dia.astype("Int64").astype(str), errors="coerce")
+        return data + minutos
+    # ano + dia juliano (+ hora). 2400 vira 00:00 do dia seguinte.
+    base = pd.to_datetime(ano_txt + "-01-01", errors="coerce")
+    return base + pd.to_timedelta(dia - 1, unit="D") + minutos
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +336,7 @@ def _classificar_coluna(nome: str, unidade: str) -> tuple[str | None, int]:
     # Radiação solar global
     if _tem(tk, "rad", "rg", "radiacao", "slr", "solar", "piran", "qg", "rs", prefixo=False) or junto.startswith(("rad", "slr")):
         if (_tem(tk, "rn", "par", "ir", "dif")
-                or any(e in junto for e in ("liq", "net", "uv", "refl", "difus", "albedo"))
+                or any(e in junto for e in ("liq", "net", "uv", "refl", "difus", "albedo", "fotoss", "saldo", "longa", "atmosf"))
                 or eh_dp):
             return None, 0
         if eh_max or eh_min:
@@ -375,28 +455,46 @@ def limpar_variavel(var: str, serie: pd.Series) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 
-def ler_arquivo_esalq(conteudo: bytes) -> tuple[pd.DataFrame, dict]:
-    """Lê o arquivo da estação e devolve (dados normalizados de 15 min, info).
+def _eh_linha_de_texto(linha: pd.Series) -> bool:
+    """Linha de unidades/tipo logo abaixo do cabeçalho (quase tudo texto, nada de números)."""
+    celulas = [v for v in linha.tolist() if pd.notna(v) and str(v).strip()]
+    if len(celulas) < 2:
+        return False
+    numeros = pd.to_numeric(pd.Series(celulas, dtype=object).astype(str).str.replace(",", "."), errors="coerce")
+    return numeros.notna().mean() < 0.2
+
+
+def ler_arquivo_esalq(conteudo: bytes, ano_arquivo: int | None = None) -> tuple[pd.DataFrame, dict]:
+    """Lê o arquivo da estação e devolve (dados normalizados, info).
 
     O DataFrame tem as colunas de `config.COLUNAS_15MIN` (as que não existirem
-    no arquivo ficam vazias).
+    no arquivo ficam vazias). `ano_arquivo` só é usado se o arquivo não tiver
+    a coluna do ano (formatos antigos com dia juliano + hora).
     """
     bruto = _ler_tabela_bruta(conteudo)
     linha_cab = _achar_linha_cabecalho(bruto)
     if linha_cab is None:
-        raise ValueError("Cabeçalho (TIMESTAMP) não encontrado no arquivo")
+        raise ValueError("Cabeçalho não encontrado (nem TIMESTAMP, nem colunas de data/dia e hora)")
 
     nomes = _nomes_unicos(bruto.iloc[linha_cab].tolist())
     corpo = bruto.iloc[linha_cab + 1:].reset_index(drop=True)
     corpo.columns = nomes
+    legenda = _legenda(bruto, linha_cab)
 
-    # Linha de unidades (TOA5): logo após o cabeçalho, com "TS" na coluna TIMESTAMP
+    # Linha de unidades logo após o cabeçalho (TOA5: "TS" na coluna TIMESTAMP)
     unidades = {n: "" for n in nomes}
-    col_ts = next((n for n in nomes if _norm(n).startswith("timestamp")), None)
-    if col_ts is not None and len(corpo) > 0 and _norm(corpo.at[0, col_ts]) == "ts":
-        unidades = {n: ("" if pd.isna(corpo.at[0, n]) else str(corpo.at[0, n])) for n in nomes}
+    if len(corpo) > 0 and _eh_linha_de_texto(corpo.iloc[0]):
+        unidades = {n: ("" if pd.isna(corpo.at[0, n]) else str(corpo.at[0, n]).strip()) for n in nomes}
+    # Formatos antigos: unidades na legenda acima do cabeçalho ("UR = Umidade Relativa (%)")
+    descricoes: dict[str, str] = {}
+    for n in nomes:
+        item = legenda.get(_norm(n))
+        if item:
+            descricoes[n] = item[0]
+            if not unidades.get(n):
+                unidades[n] = item[1]
 
-    data_hora = _timestamp_de_colunas(corpo)
+    data_hora = _timestamp_de_colunas(corpo, ano_arquivo)
     if data_hora is None:
         raise ValueError("Não foi possível montar a data/hora dos registros")
 
@@ -412,9 +510,13 @@ def ler_arquivo_esalq(conteudo: bytes) -> tuple[pd.DataFrame, dict]:
     # Classifica as colunas e escolhe a de maior prioridade para cada variável
     candidatos: dict[str, tuple[int, str]] = {}
     for n in nomes:
-        if n == "_dh":
+        if n == "_dh" or _papel_tempo(n):
             continue
         var, prioridade = _classificar_coluna(n, unidades.get(n, ""))
+        if var is None and n in descricoes:
+            # Sigla desconhecida: tenta pela descrição da legenda (prioridade menor)
+            var, prioridade = _classificar_coluna(descricoes[n], unidades.get(n, ""))
+            prioridade -= 1
         if var is None:
             continue
         valores = pd.to_numeric(corpo[n], errors="coerce")
@@ -447,6 +549,7 @@ def ler_arquivo_esalq(conteudo: bytes) -> tuple[pd.DataFrame, dict]:
     info = {
         "colunas_brutas": [n for n in nomes if n != "_dh"],
         "unidades": {k: v for k, v in unidades.items() if v},
+        "legenda": descricoes,
         "mapeamento": mapeamento,
         "conversoes": conversoes,
         "intervalo_s": dt_s,
@@ -471,22 +574,42 @@ def dia_meteorologico(data_hora: pd.Series) -> pd.Series:
     return (data_hora - pd.Timedelta(seconds=1)).dt.normalize()
 
 
+# Maior intervalo entre registros aceito como "passo" da série (h). Acima disso
+# os dados são diários ou há falhas longas.
+INTERVALO_MAX_H = 3.0
+
+
+def intervalo_nominal(data_hora: pd.Series, dia: pd.Series | None = None) -> pd.Series:
+    """Intervalo de registro (h) de cada linha: o intervalo mais comum do seu dia.
+
+    Usa o passo do dia, e não a diferença até o registro anterior, porque depois
+    de uma falha o registro continua valendo só pelo seu intervalo (15 min, 1 h).
+    Assim séries que mudam de resolução ao longo dos anos (horária → 15 min)
+    também ficam certas.
+    """
+    if data_hora.empty:
+        return pd.Series(dtype="float64", index=data_hora.index)
+    if dia is None:
+        dia = dia_meteorologico(data_hora)
+    dif = (data_hora.diff().dt.total_seconds() / 3600).round(4)
+    ok = (dif > 0) & (dif <= INTERVALO_MAX_H)
+    if not ok.any():
+        return pd.Series(np.nan, index=data_hora.index)
+    contagem = pd.DataFrame({"dia": dia[ok], "dif": dif[ok]}).groupby(["dia", "dif"]).size()
+    modal_dia = contagem.groupby(level=0).idxmax().map(lambda t: t[1])
+    modal_geral = float(dif[ok].mode().iloc[0])
+    return dia.map(modal_dia).astype("float64").fillna(modal_geral)
+
+
 def adicionar_derivados(df: pd.DataFrame) -> pd.DataFrame:
     """Acrescenta intervalo (h), intensidade (mm/h), dia e chuva acumulada no dia."""
     df = df.sort_values("data_hora").reset_index(drop=True)
-    dif = df["data_hora"].diff().dt.total_seconds() / 3600
-    modal = dif[(dif > 0) & (dif <= 0.5)].mode()
-    padrao = float(modal.iloc[0]) if len(modal) else 0.25
-    dif = dif.fillna(padrao)
-    intervalo = dif.where((dif > 0) & (dif <= 0.5))
+    dia = dia_meteorologico(df["data_hora"])
+    intervalo = intervalo_nominal(df["data_hora"], dia)
 
     intensidade = df["chuva_mm"] / intervalo
     intensidade = intensidade.mask(intensidade > 500)
 
-    df = df.assign(
-        intervalo_h=intervalo,
-        intensidade_mm_h=intensidade,
-        dia=dia_meteorologico(df["data_hora"]),
-    )
+    df = df.assign(intervalo_h=intervalo, intensidade_mm_h=intensidade, dia=dia)
     df["chuva_acum_dia_mm"] = df.groupby("dia")["chuva_mm"].cumsum()
     return df

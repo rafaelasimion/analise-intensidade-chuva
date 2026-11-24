@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useApi } from '../api.js';
 import Grafico from '../componentes/Grafico.jsx';
 import {
-  Aviso, BarraPeriodo, BlocoGrafico, CabecalhoPagina, CampoNumero, Carregando, Segmentado, Tabela, TabelaDobravel,
+  Aviso, BarraPeriodo, BlocoGrafico, CampoNumero, Carregando, IntroAba, Segmentado, Tabela, TabelaDobravel,
 } from '../componentes/Comuns.jsx';
 import Downloads from '../componentes/Downloads.jsx';
 import { dataBR, num } from '../formato.js';
@@ -10,12 +10,14 @@ import { opcaoEventos, opcaoMaximas } from '../graficos/opcoes.js';
 import { useMeta } from '../meta.jsx';
 import { usePeriodo } from '../periodo.js';
 
-const ORDENS = [
+const ordens = (horario) => [
   { id: 'inicio', rotulo: 'Data' },
   { id: 'chuva_mm', rotulo: 'Chuva' },
-  { id: 'i15_mm_h', rotulo: 'Pico (I15)' },
+  horario ? { id: 'i60_mm_h', rotulo: 'Pico (I60)' } : { id: 'i15_mm_h', rotulo: 'Pico (I15)' },
   { id: 'duracao_min', rotulo: 'Duração' },
 ];
+
+const JANELA = { i15_mm_h: 'em 15 min', i30_mm_h: 'em 30 min', i60_mm_h: 'em 1 h', intensidade_media_mm_h: 'de média' };
 
 const COLUNAS_EVENTOS = [
   { chave: 'evento', rotulo: 'Nº', tipo: 'num', casas: 0 },
@@ -31,14 +33,18 @@ const COLUNAS_EVENTOS = [
 
 export default function Eventos() {
   const { periodo, escolherPreset, escolherIntervalo, presets } = usePeriodo('ano');
-  const { versao } = useMeta();
+  const { versao, api, posto } = useMeta();
+  const horario = posto?.resolucao_min === 60;
+  const semRegistros = posto && !posto.tem_registros;
   const [seco, setSeco] = useState(6);
   const [minimo, setMinimo] = useState(1);
   const [ordem, setOrdem] = useState('inicio');
 
-  const base = periodo ? { inicio: periodo.inicio, fim: periodo.fim, v: versao } : null;
-  const ev = useApi('/api/esalq/eventos', base && { ...base, intervalo_seco_h: seco, chuva_min_mm: minimo }, Boolean(base));
-  const mx = useApi('/api/esalq/maximas', base, Boolean(base));
+  const base = periodo && !semRegistros ? { inicio: periodo.inicio, fim: periodo.fim, v: versao } : null;
+  const ev = useApi(`${api}/eventos`, base && { ...base, intervalo_seco_h: seco, chuva_min_mm: minimo }, Boolean(base));
+  const mx = useApi(`${api}/maximas`, base, Boolean(base));
+  const colunaPico = horario ? 'i60_mm_h' : 'i15_mm_h';
+  const colunasEventos = COLUNAS_EVENTOS.filter((c) => !horario || !['i15_mm_h', 'i30_mm_h'].includes(c.chave));
 
   const eventos = ev.dados?.eventos ?? [];
   const ordenados = useMemo(() => {
@@ -46,15 +52,26 @@ export default function Eventos() {
     if (ordem === 'inicio') return copia;
     return copia.sort((a, b) => (b[ordem] ?? -1) - (a[ordem] ?? -1));
   }, [eventos, ordem]);
-  const opcaoDispersao = useMemo(() => (eventos.length ? opcaoEventos(eventos) : null), [eventos]);
+  const opcaoDispersao = useMemo(
+    () => (eventos.length ? opcaoEventos(eventos, colunaPico, horario ? 'pico em 1 h' : 'pico em 15 min') : null),
+    [eventos, colunaPico, horario],
+  );
   const opcaoMax = useMemo(() => (mx.dados?.anos?.length ? opcaoMaximas(mx.dados) : null), [mx.dados]);
   const resumo = ev.dados?.resumo;
 
   return (
     <div className="pagina">
-      <CabecalhoPagina titulo="Eventos de chuva">
+      <IntroAba titulo="Eventos de chuva">
         Cada chuva separada das outras por um período seco, com a duração, o total e a intensidade em mm/h.
-      </CabecalhoPagina>
+        {horario && ' Nas estações horárias a menor janela de intensidade é de 1 hora (I60).'}
+      </IntroAba>
+
+      {semRegistros && (
+        <Aviso tipo="info" titulo="Eventos precisam dos dados horários">
+          Este posto ainda só tem totais diários no site. Os eventos e as máximas aparecem depois da próxima atualização
+          automática.
+        </Aviso>
+      )}
 
       <BarraPeriodo periodo={periodo} presets={presets} escolherPreset={escolherPreset} escolherIntervalo={escolherIntervalo}>
         <CampoNumero rotulo="Período seco entre eventos" unidade="h" valor={seco} aoMudar={setSeco} min={0.25} max={72} />
@@ -75,7 +92,7 @@ export default function Eventos() {
               ? 'Nenhum evento com esses critérios no período.'
               : `${num(resumo.n_eventos, 0)} eventos somando ${num(resumo.chuva_total_eventos_mm, 1)} mm, com duração média de ${num(resumo.duracao_media_min / 60, 1)} h. ` +
                 `O maior foi o nº ${resumo.maior_evento.evento} (${num(resumo.maior_evento.chuva_mm, 1)} mm, ${dataBR(resumo.maior_evento.inicio)}); ` +
-                `o mais intenso, o nº ${resumo.mais_intenso.evento} (${num(resumo.mais_intenso.i15_mm_h, 1)} mm/h em 15 min, ${dataBR(resumo.mais_intenso.inicio)}).`}
+                `o mais intenso, o nº ${resumo.mais_intenso.evento} (${num(resumo.mais_intenso.intensidade_mm_h, 1)} mm/h ${JANELA[resumo.mais_intenso.coluna] ?? ''}, ${dataBR(resumo.mais_intenso.inicio)}).`}
           </p>
 
           {opcaoDispersao && (
@@ -91,11 +108,11 @@ export default function Eventos() {
             <section className="secao" aria-labelledby="titulo-eventos">
               <div className="secao__topo">
                 <h2 id="titulo-eventos" className="secao__titulo">Tabela de eventos</h2>
-                <Segmentado rotulo="Ordenar por" opcoes={ORDENS} valor={ordem} aoMudar={setOrdem} />
+                <Segmentado rotulo="Ordenar por" opcoes={ordens(horario)} valor={ordem} aoMudar={setOrdem} />
               </div>
-              <Tabela legenda="Eventos de chuva" colunas={COLUNAS_EVENTOS} linhas={ordenados.map((e) => ({ ...e, id: e.evento }))} />
+              <Tabela legenda="Eventos de chuva" colunas={colunasEventos} linhas={ordenados.map((e) => ({ ...e, id: e.evento }))} />
               <Downloads
-                caminho="/api/esalq/download"
+                caminho={`${api}/download`}
                 params={{ tipo: 'eventos', inicio: periodo.inicio, fim: periodo.fim, intervalo_seco_h: seco, chuva_min_mm: minimo }}
                 variavelR="eventos"
               />
@@ -109,7 +126,7 @@ export default function Eventos() {
       <section className="secao" aria-labelledby="titulo-maximas">
         <h2 id="titulo-maximas" className="secao__titulo">Máximas anuais por duração</h2>
         <p className="secao__texto">
-          A maior chuva de cada ano em janelas móveis de 15 minutos a 24 horas, base para curvas
+          A maior chuva de cada ano em janelas móveis de {horario ? '1 hora' : '15 minutos'} a 24 horas, base para curvas
           intensidade-duração-frequência (IDF). Anos com menos de 80% de dados ficam fora da média.
         </p>
         {mx.erro && <Aviso tipo="erro">{mx.erro.message}</Aviso>}
@@ -122,7 +139,7 @@ export default function Eventos() {
             )}
             <TabelaMaximas maximas={mx.dados} />
             <Downloads
-              caminho="/api/esalq/download"
+              caminho={`${api}/download`}
               params={{ tipo: 'maximas', inicio: periodo.inicio, fim: periodo.fim }}
               variavelR="maximas"
             />
@@ -204,7 +221,7 @@ function Calculadora() {
       </div>
       <p className="texto-pequeno">
         {intensidade !== null && `${num(chuva, 1)} mm em ${num(minutos, 0)} min equivalem a ${num(intensidade, 1)} mm por hora.`}
-        {' '}Com dados da estação, use a tabela de eventos acima: ela já traz a duração e a intensidade de cada chuva.
+        {' '}Com dados do posto, use a tabela de eventos acima: ela já traz a duração e a intensidade de cada chuva.
       </p>
     </section>
   );

@@ -3,30 +3,31 @@ import { useApi } from '../api.js';
 import { linhasDaSerie } from '../colunas.js';
 import Grafico from '../componentes/Grafico.jsx';
 import {
-  Aviso, BarraPeriodo, BlocoGrafico, CabecalhoPagina, Carregando, Ficha, TabelaDobravel,
+  Aviso, BarraPeriodo, BlocoGrafico, Carregando, Ficha, IntroAba, TabelaDobravel,
 } from '../componentes/Comuns.jsx';
 import { dataBR, dataHoraBR, num, periodoExtenso } from '../formato.js';
 import {
   NOME_PASSO, POR_PASSO, opcaoBarrasChuva, opcaoIntensidade, opcaoPluviograma, opcaoTemperatura, opcaoUmidade, opcaoVento,
 } from '../graficos/opcoes.js';
 import { temDados } from '../graficos/tema.js';
-import { useMeta } from '../meta.jsx';
+import { textosResolucao, useMeta } from '../meta.jsx';
 import { usePeriodo } from '../periodo.js';
 
 const TIPO_TEMPO = { '15min': 'datahora', '1h': 'datahora', '1D': 'data', '1W': 'data', '1M': 'data' };
 
 export default function Painel() {
   const { periodo, escolherPreset, escolherIntervalo, presets } = usePeriodo('30d');
-  const { meta, versao } = useMeta();
+  const { meta, versao, api, posto } = useMeta();
+  const textos = textosResolucao(posto?.resolucao_min);
 
   const params = periodo ? { inicio: periodo.inicio, fim: periodo.fim, v: versao } : null;
-  const { dados, erro, carregando } = useApi('/api/esalq/painel', params, Boolean(periodo));
+  const { dados, erro, carregando } = useApi(`${api}/painel`, params, Boolean(periodo));
 
   const limites = meta?.limites;
   const paramsAnual = limites?.inicio
     ? { escala: 'anual', inicio: limites.inicio.slice(0, 10), fim: limites.fim.slice(0, 10), v: versao }
     : null;
-  const anual = useApi('/api/esalq/relatorio', paramsAnual, Boolean(paramsAnual));
+  const anual = useApi(`${api}/relatorio`, paramsAnual, Boolean(paramsAnual));
 
   const serie = dados?.serie;
   const passo = dados?.passo;
@@ -36,12 +37,12 @@ export default function Painel() {
     if (!serie?.t?.length) return null;
     return {
       pluviograma: opcaoPluviograma(serie, passo),
-      intensidade: temDados(serie, 'intensidade_max_mm_h') ? opcaoIntensidade(serie, passo) : null,
+      intensidade: temDados(serie, 'intensidade_max_mm_h') ? opcaoIntensidade(serie, passo, textos.noIntervalo) : null,
       temperatura: temDados(serie, 'temp_c') ? opcaoTemperatura(serie, passo) : null,
       umidade: temDados(serie, 'ur_pct') ? opcaoUmidade(serie, passo) : null,
       vento: temDados(serie, 'vento_ms') ? opcaoVento(serie, passo) : null,
     };
-  }, [serie, passo]);
+  }, [serie, passo, textos.noIntervalo]);
 
   const opcaoAnual = useMemo(
     () => (anual.dados?.linhas?.length ? opcaoBarrasChuva(anual.dados.linhas, undefined, undefined, undefined, anoIncompleto) : null),
@@ -52,10 +53,13 @@ export default function Painel() {
 
   return (
     <div className="pagina">
-      <CabecalhoPagina titulo="Painel da estação">
-        Chuva, intensidade, temperatura, umidade e vento medidos a cada 15 minutos na estação automática da
-        ESALQ/USP, em Piracicaba.
-      </CabecalhoPagina>
+      <IntroAba titulo="Painel">
+        {posto && !posto.tem_registros
+          ? 'Chuva diária e acumulada, temperatura, umidade e vento deste posto, a partir dos totais diários.'
+          : `Chuva por intervalo e acumulada, intensidade, temperatura, umidade e vento medidos ${
+              posto?.resolucao_min === 60 ? 'a cada hora' : 'a cada 15 minutos'
+            } neste posto.`}
+      </IntroAba>
 
       <BarraPeriodo
         periodo={periodo}
@@ -99,18 +103,24 @@ export default function Painel() {
                 />
               </section>
 
-              <Ficha itens={itensFicha(r)} />
+              <Ficha itens={itensFicha(r, textos)} />
 
               {r.variaveis.length === 1 && (
                 <Aviso tipo="info" titulo="Só há chuva neste período">
-                  Temperatura, umidade e vento aparecem aqui quando a série tiver essas medidas. Os arquivos completos
-                  da ESALQ são baixados pela atualização semanal (veja Métodos).
+                  Temperatura, umidade e vento aparecem aqui quando a série do posto tiver essas medidas.
                 </Aviso>
               )}
 
               <div className="multiplos">
                 {opcoes.intensidade && (
-                  <BlocoGrafico titulo="Intensidade da chuva" nota={passo === '15min' ? 'Intensidade de cada intervalo de 15 min (mm/h)' : `Maior intensidade em 15 min dentro de cada ${NOME_PASSO[passo]} (mm/h)`}>
+                  <BlocoGrafico
+                    titulo="Intensidade da chuva"
+                    nota={
+                      (passo === '15min' && posto?.resolucao_min !== 60) || (passo === '1h' && posto?.resolucao_min === 60)
+                        ? `Intensidade de cada intervalo de ${textos.intervalo} (mm/h)`
+                        : `Maior intensidade ${textos.noIntervalo} dentro de cada ${NOME_PASSO[passo]} (mm/h)`
+                    }
+                  >
                     <Grafico opcao={opcoes.intensidade} altura={220} descricao="Intensidade máxima da chuva em mm/h" />
                     <TabelaDobravel
                       legenda="Intensidade máxima"
@@ -194,7 +204,8 @@ function anoIncompleto(l) {
   return l.dias_com_dados < 0.9 * dias;
 }
 
-function itensFicha(r) {
+function itensFicha(r, textos) {
+  const soDiario = r.resolucao_min === 1440;
   const itens = [
     { rotulo: 'Chuva total', valor: num(r.chuva_total_mm, 1), unidade: 'mm' },
     { rotulo: 'Dias com chuva (≥ 1 mm)', valor: String(r.dias_chuva), nota: `em ${r.periodo.dias} dias` },
@@ -204,8 +215,8 @@ function itensFicha(r) {
       unidade: 'mm',
       nota: r.chuva_max_diaria.quando ? `em ${dataBR(r.chuva_max_diaria.quando)}` : null,
     },
-    {
-      rotulo: 'Maior intensidade (15 min)',
+    !soDiario && {
+      rotulo: textos.maiorIntensidade,
       valor: num(r.intensidade_max.valor, 1),
       unidade: 'mm/h',
       nota: r.intensidade_max.quando && r.intensidade_max.valor > 0 ? `às ${dataHoraBR(r.intensidade_max.quando)}` : null,
@@ -216,7 +227,7 @@ function itensFicha(r) {
       rotulo: 'Temperatura média',
       valor: num(r.temp_media_c, 1),
       unidade: '°C',
-      nota: `máx. ${num(r.temp_max.valor, 1)} °C, mín. ${num(r.temp_min.valor, 1)} °C`,
+      nota: r.temp_max.valor !== null ? `máx. ${num(r.temp_max.valor, 1)} °C, mín. ${num(r.temp_min.valor, 1)} °C` : null,
     });
   }
   if (r.ur_media_pct !== null) itens.push({ rotulo: 'Umidade relativa média', valor: num(r.ur_media_pct, 0), unidade: '%' });
@@ -227,9 +238,9 @@ function itensFicha(r) {
       unidade: 'm/s',
       nota:
         r.rajada_max.valor !== null
-          ? `rajada de ${num(r.rajada_max.valor, 1)} m/s em ${dataHoraBR(r.rajada_max.quando)}`
+          ? `rajada de ${num(r.rajada_max.valor, 1)} m/s em ${(soDiario ? dataBR : dataHoraBR)(r.rajada_max.quando)}`
           : r.vento_max_15min?.valor !== null && r.vento_max_15min?.valor !== undefined
-            ? `máx. de ${num(r.vento_max_15min.valor, 1)} m/s (média de 15 min) em ${dataHoraBR(r.vento_max_15min.quando)}`
+            ? `máx. de ${num(r.vento_max_15min.valor, 1)} m/s (média ${textos.noIntervalo}) em ${dataHoraBR(r.vento_max_15min.quando)}`
             : null,
     });
   }
@@ -237,7 +248,7 @@ function itensFicha(r) {
     rotulo: 'Dados válidos',
     valor: num(r.cobertura_pct, 1),
     unidade: '%',
-    nota: `${num(r.registros, 0)} registros de 15 min`,
+    nota: soDiario ? `${num(r.registros, 0)} dias com dados` : `${num(r.registros, 0)} ${textos.registros}`,
   });
   return itens;
 }

@@ -67,6 +67,13 @@ def registros_esperados_por_dia(df15: pd.DataFrame) -> float:
     return 96.0
 
 
+def resolucao_min(df15: pd.DataFrame) -> int | None:
+    """Intervalo mais comum dos registros, em minutos (15, 60...)."""
+    if df15.empty or "intervalo_h" not in df15 or df15["intervalo_h"].notna().sum() == 0:
+        return None
+    return int(round(float(df15["intervalo_h"].mode().iloc[0]) * 60))
+
+
 # ---------------------------------------------------------------------------
 # Diário a partir dos dados de 15 min
 # ---------------------------------------------------------------------------
@@ -81,8 +88,9 @@ def diario_de_15min(df15: pd.DataFrame) -> pd.DataFrame:
     if df15.empty:
         return pd.DataFrame(columns=colunas)
 
-    esperado = registros_esperados_por_dia(df15)
     g = df15.groupby("dia")
+    # Registros esperados em cada dia (96 para 15 min, 24 para 1 h)
+    esperado = (24 / g["intervalo_h"].median()).fillna(registros_esperados_por_dia(df15))
 
     temp_max = g["temp_max_c"].max() if df15["temp_max_c"].notna().any() else g["temp_c"].max()
     temp_min = g["temp_min_c"].min() if df15["temp_min_c"].notna().any() else g["temp_c"].min()
@@ -92,9 +100,13 @@ def diario_de_15min(df15: pd.DataFrame) -> pd.DataFrame:
 
     vento_max = g["vento_max_ms"].max()
 
-    rad_media = g["rad_w_m2"].mean()
-    rad_cont = g["rad_w_m2"].count()
-    rad_mj = (rad_media * 0.0864).where(rad_cont >= 0.9 * esperado)
+    # Radiação do dia (MJ/m²) = soma de W/m² × duração do intervalo. Vale se as horas
+    # centrais do dia (08–17 h, sempre com sol em SP) estiverem ≥ 90% completas; à noite
+    # o INMET deixa a radiação em branco, então as falhas fora dessas horas não contam.
+    hora = df15["data_hora"].dt.hour
+    centrais = df15["rad_w_m2"].where(hora.between(8, 17)).groupby(df15["dia"]).count()
+    energia = df15["rad_w_m2"].clip(lower=0) * df15["intervalo_h"] * 0.0036
+    rad_mj = energia.groupby(df15["dia"]).sum(min_count=1).where(centrais >= 0.9 * esperado * 10 / 24)
 
     validos = g["chuva_mm"].count()
     diario = pd.DataFrame({
@@ -121,6 +133,9 @@ def diario_de_15min(df15: pd.DataFrame) -> pd.DataFrame:
 
 
 def resumo(df15: pd.DataFrame, diario: pd.DataFrame, inicio: date, fim: date) -> dict:
+    """Cartões do painel. Sem registros sub-diários, usa só a série diária."""
+    if df15.empty and not diario.empty:
+        return _resumo_diario(diario, inicio, fim)
     dias_periodo = (fim - inicio).days + 1
     esperado = registros_esperados_por_dia(df15) * dias_periodo
     chuva_validos = int(df15["chuva_mm"].count()) if not df15.empty else 0
@@ -133,6 +148,7 @@ def resumo(df15: pd.DataFrame, diario: pd.DataFrame, inicio: date, fim: date) ->
             "primeiro_registro": _iso(df15["data_hora"].min()) if not df15.empty else None,
             "ultimo_registro": _iso(df15["data_hora"].max()) if not df15.empty else None,
         },
+        "resolucao_min": resolucao_min(df15),
         "registros": int(len(df15)),
         "cobertura_pct": _num(min(100.0, chuva_validos / esperado * 100) if esperado else None, 1),
         "chuva_total_mm": _num(df15["chuva_mm"].sum(min_count=1)) if not df15.empty else None,
@@ -151,18 +167,51 @@ def resumo(df15: pd.DataFrame, diario: pd.DataFrame, inicio: date, fim: date) ->
     }
 
 
+def _resumo_diario(diario: pd.DataFrame, inicio: date, fim: date) -> dict:
+    dias_periodo = (fim - inicio).days + 1
+    validos = int(diario["chuva_mm"].count())
+    return {
+        "periodo": {
+            "inicio": inicio.isoformat(),
+            "fim": fim.isoformat(),
+            "dias": dias_periodo,
+            "primeiro_registro": _iso(diario["dia"].min()),
+            "ultimo_registro": _iso(diario["dia"].max()),
+        },
+        "resolucao_min": 1440,
+        "registros": int(len(diario)),
+        "cobertura_pct": _num(min(100.0, validos / dias_periodo * 100), 1),
+        "chuva_total_mm": _num(diario["chuva_mm"].sum(min_count=1)),
+        "dias_chuva": int((diario["chuva_mm"] >= LIMIAR_DIA_CHUVA_MM).sum()),
+        "chuva_max_diaria": _max_com_momento(diario, "chuva_mm", "dia"),
+        "intensidade_max": {"valor": None, "quando": None},
+        "temp_media_c": _num(diario["temp_c"].mean()),
+        "temp_max": _max_com_momento(diario, "temp_max_c", "dia"),
+        "temp_min": _min_com_momento(diario, "temp_min_c", "dia"),
+        "ur_media_pct": _num(diario["ur_pct"].mean(), 1),
+        "vento_medio_ms": _num(diario["vento_ms"].mean()),
+        "rajada_max": _max_com_momento(diario, "vento_max_ms", "dia"),
+        "vento_max_15min": {"valor": None, "quando": None},
+        "rad_media_mj_m2_dia": _num(diario["rad_mj_m2"].mean()),
+        "variaveis": variaveis_com_dados(diario),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Série para gráficos
 # ---------------------------------------------------------------------------
 
 PASSOS = {"15min", "1h", "1D", "1W", "1M"}
+MINUTOS_PASSO = {"15min": 15, "1h": 60, "1D": 1440, "1W": 10080, "1M": 43200}
 
 
-def escolher_passo(inicio: date, fim: date) -> str:
+def escolher_passo(inicio: date, fim: date, resolucao: int | None = 15) -> str:
+    """Passo do gráfico pelo tamanho do período (nunca mais fino que os dados)."""
+    resolucao = resolucao or 15
     dias = (fim - inicio).days + 1
-    if dias <= 4:
+    if dias <= 4 and resolucao <= 15:
         return "15min"
-    if dias <= 45:
+    if dias <= 45 and resolucao <= 60:
         return "1h"
     if dias <= 800:
         return "1D"
@@ -220,6 +269,15 @@ def serie(df15: pd.DataFrame, diario: pd.DataFrame, passo: str) -> pd.DataFrame:
 
     s["chuva_acum_mm"] = s["chuva_mm"].fillna(0).cumsum().where(s["chuva_mm"].notna().cumsum() > 0)
     return s
+
+
+def ajustar_passo(passo: str, resolucao: int | None) -> str:
+    """Troca um passo mais fino que os dados pelo passo dos dados (15 min -> 1 h numa estação horária)."""
+    if resolucao is None:
+        return passo
+    if MINUTOS_PASSO.get(passo, 0) >= resolucao:
+        return passo
+    return next(p for p in ("15min", "1h", "1D", "1W", "1M") if MINUTOS_PASSO[p] >= resolucao)
 
 
 def serie_para_json(s: pd.DataFrame) -> dict:

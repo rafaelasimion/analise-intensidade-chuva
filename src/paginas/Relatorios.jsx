@@ -4,12 +4,13 @@ import { urlApi, useApi } from '../api.js';
 import { colunasDe } from '../colunas.js';
 import Grafico from '../componentes/Grafico.jsx';
 import {
-  Aviso, BarraPeriodo, BlocoGrafico, CabecalhoPagina, Carregando, Ficha, Segmentado, Tabela,
+  Aviso, BarraPeriodo, BlocoGrafico, Carregando, Ficha, IntroAba, Segmentado, Tabela,
 } from '../componentes/Comuns.jsx';
 import Downloads from '../componentes/Downloads.jsx';
 import { dataBR, dataHoraBR, num, periodoExtenso } from '../formato.js';
 import { opcaoBarrasChuva } from '../graficos/opcoes.js';
-import { useMeta } from '../meta.jsx';
+import { textosResolucao, useMeta } from '../meta.jsx';
+import { nomePosto } from '../postos.js';
 import { usePeriodo } from '../periodo.js';
 
 const ESCALAS = [
@@ -23,7 +24,8 @@ const UNIDADE = { diario: 'dia', semanal: 'semana', mensal: 'mês', anual: 'ano'
 
 export default function Relatorios() {
   const { periodo, escolherPreset, escolherIntervalo, presets } = usePeriodo('ano');
-  const { meta, versao } = useMeta();
+  const { versao, api, posto } = useMeta();
+  const textos = textosResolucao(posto?.resolucao_min);
   const [params, setParams] = useSearchParams();
   const escala = params.get('escala') ?? 'mensal';
   const mudarEscala = (id) =>
@@ -34,7 +36,7 @@ export default function Relatorios() {
     });
 
   const consulta = periodo ? { inicio: periodo.inicio, fim: periodo.fim, escala, v: versao } : null;
-  const { dados, erro, carregando } = useApi('/api/esalq/relatorio', consulta, Boolean(consulta));
+  const { dados, erro, carregando } = useApi(`${api}/relatorio`, consulta, Boolean(consulta));
   const r = dados?.resumo;
 
   const colunas = useMemo(() => {
@@ -73,15 +75,15 @@ export default function Relatorios() {
     return opcaoBarrasChuva(dados.linhas);
   }, [dados?.linhas]);
 
-  const est = meta?.estacao;
-  const urlPlanilha = periodo ? urlApi('/api/esalq/planilha', { inicio: periodo.inicio, fim: periodo.fim }) : null;
+  const urlPlanilha = periodo ? urlApi(`${api}/planilha`, { inicio: periodo.inicio, fim: periodo.fim }) : null;
+  const soDiario = r?.resolucao_min === 1440;
 
   return (
     <div className="pagina">
-      <CabecalhoPagina titulo="Relatórios">
+      <IntroAba titulo="Relatórios">
         Resumo diário, semanal, mensal ou anual do período escolhido. O botão de impressão gera uma versão limpa, pronta
         para salvar em PDF.
-      </CabecalhoPagina>
+      </IntroAba>
 
       <BarraPeriodo periodo={periodo} presets={presets} escolherPreset={escolherPreset} escolherIntervalo={escolherIntervalo}>
         <Segmentado rotulo="Escala do relatório" opcoes={ESCALAS} valor={escala} aoMudar={mudarEscala} />
@@ -90,7 +92,7 @@ export default function Relatorios() {
       {periodo && (
         <section className="secao nao-imprimir" aria-labelledby="titulo-exportar">
           <h2 id="titulo-exportar" className="secao__titulo">Exportar</h2>
-          <Downloads caminho="/api/esalq/download" params={{ tipo: escala, inicio: periodo.inicio, fim: periodo.fim }} variavelR="relatorio">
+          <Downloads caminho={`${api}/download`} params={{ tipo: escala, inicio: periodo.inicio, fim: periodo.fim }} variavelR="relatorio">
             <button type="button" className="botao" onClick={() => window.print()}>
               Imprimir ou salvar PDF
             </button>
@@ -99,7 +101,7 @@ export default function Relatorios() {
             </a>
           </Downloads>
           <p className="texto-pequeno">
-            A planilha hidrológica reúne, em abas, os dados de 15 min, os resumos diário, semanal, mensal e anual, os
+            A planilha hidrológica reúne, em abas, os {textos.registros}, os resumos diário, semanal, mensal e anual, os
             eventos de chuva, as máximas anuais e, quando houver temperatura, o balanço hídrico.
           </p>
         </section>
@@ -119,9 +121,12 @@ export default function Relatorios() {
               Relatório {NOME[escala]}: {periodoExtenso(periodo.inicio, periodo.fim)}
             </h2>
             <p className="relatorio__meta">
-              {est ? `${est.nome}, ${est.municipio}/SP (lat. ${num(est.lat, 4)}, long. ${num(est.lon, 4)}, ${num(est.alt, 0)} m). ` : ''}
-              Registros de {dataHoraBR(r.periodo.primeiro_registro)} a {dataHoraBR(r.periodo.ultimo_registro)}. Gerado em{' '}
-              {dataHoraBR(new Date())}.
+              {posto
+                ? `${nomePosto(posto)}${posto.fonte === 'inmet' ? ` (INMET ${posto.codigo})` : ''}, ${posto.municipio}/SP ` +
+                  `(lat. ${num(posto.lat, 4)}, long. ${num(posto.lon, 4)}${posto.alt !== null ? `, ${num(posto.alt, 0)} m` : ''}). `
+                : ''}
+              {soDiario ? 'Dias' : 'Registros'} de {(soDiario ? dataBR : dataHoraBR)(r.periodo.primeiro_registro)} a{' '}
+              {(soDiario ? dataBR : dataHoraBR)(r.periodo.ultimo_registro)}. Gerado em {dataHoraBR(new Date())}.
             </p>
           </header>
 
@@ -135,8 +140,8 @@ export default function Relatorios() {
                 unidade: 'mm',
                 nota: r.chuva_max_diaria.quando ? dataBR(r.chuva_max_diaria.quando) : null,
               },
-              {
-                rotulo: 'Maior intensidade (15 min)',
+              !soDiario && {
+                rotulo: textos.maiorIntensidade,
                 valor: num(r.intensidade_max.valor, 1),
                 unidade: 'mm/h',
                 nota: r.intensidade_max.valor > 0 ? dataHoraBR(r.intensidade_max.quando) : null,
@@ -148,7 +153,9 @@ export default function Relatorios() {
                 unidade: 'm/s',
                 nota: r.rajada_max.valor !== null
                   ? `rajada de ${num(r.rajada_max.valor, 1)} m/s`
-                  : `máx. de ${num(r.vento_max_15min.valor, 1)} m/s (média de 15 min)`,
+                  : r.vento_max_15min.valor !== null
+                    ? `máx. de ${num(r.vento_max_15min.valor, 1)} m/s (média ${textos.noIntervalo})`
+                    : null,
               },
               { rotulo: 'Dados válidos', valor: num(r.cobertura_pct, 1), unidade: '%' },
             ]}
@@ -163,9 +170,9 @@ export default function Relatorios() {
           <Tabela legenda={`Relatório ${NOME[escala]}`} colunas={colunas} linhas={dados.linhas} rodape={totais} />
 
           <p className="relatorio__notas">
-            Dia com chuva: ≥ 1 mm. Cada registro de 15 min representa o intervalo que termina no horário indicado (o de
-            00:00 pertence ao dia anterior). Intensidade = chuva do intervalo ÷ duração. Fonte: estação automática do
-            LEB/ESALQ/USP.
+            Dia com chuva: ≥ 1 mm. Cada {textos.registro} representa o intervalo que termina no horário indicado, em hora
+            de Brasília (o de 00:00 pertence ao dia anterior). Intensidade = chuva do intervalo ÷ duração. Fonte:{' '}
+            {posto?.fonte === 'inmet' ? `estação automática ${posto.codigo} do INMET.` : 'estação automática do LEB/ESALQ/USP.'}
           </p>
         </article>
       )}

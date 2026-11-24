@@ -14,46 +14,9 @@ NASA_INICIO = date(1981, 1, 1)
 
 def lista_postos(busca: str = "") -> list[dict]:
     """ESALQ + estações automáticas do INMET em SP (com o período de dados disponível)."""
-    limites = armazenamento.limites_dados()
-    postos = [{
-        "id": "esalq",
-        "fonte": "esalq",
-        "codigo": "ESALQ",
-        "nome": ESALQ["nome"],
-        "municipio": ESALQ["municipio"],
-        "uf": "SP",
-        "lat": ESALQ["lat"],
-        "lon": ESALQ["lon"],
-        "alt": ESALQ["alt"],
-        "rede": ESALQ["rede"],
-        "tipo": "Automática (15 min)",
-        "inicio_dados": (limites["inicio"] or "")[:10] or None,
-        "fim_dados": (limites["fim"] or "")[:10] or None,
-        "tem_dados": limites["inicio"] is not None,
-    }]
-    for e in inmet.estacoes():
-        postos.append({
-            "id": f"inmet-{e['codigo']}",
-            "fonte": "inmet",
-            "codigo": e["codigo"],
-            "nome": inmet.nome_legivel(e["nome"]),
-            "municipio": e.get("municipio") or inmet.nome_legivel(e["nome"].split(" - ")[0]),
-            "uf": e.get("uf", "SP"),
-            "lat": e["lat"],
-            "lon": e["lon"],
-            "alt": e.get("alt"),
-            "rede": "INMET",
-            "tipo": "Automática (horária)",
-            "fundacao": e.get("fundacao"),
-            "inicio_dados": e.get("inicio_dados"),
-            "fim_dados": e.get("fim_dados"),
-            "tem_dados": bool(e.get("inicio_dados")),
-        })
-    if busca:
-        b = busca.strip().lower()
-        postos = [p for p in postos if b in p["nome"].lower() or b in p["codigo"].lower()
-                  or b in (p.get("municipio") or "").lower()]
-    return postos
+    from . import postos
+
+    return postos.listar(busca)
 
 
 def dados_para_balanco(
